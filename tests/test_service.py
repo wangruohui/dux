@@ -6,7 +6,7 @@ from pathlib import Path
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from duviz.service import DuvizService
+from dux.service import DuxService
 
 
 class ServiceTests(unittest.TestCase):
@@ -14,8 +14,8 @@ class ServiceTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name) / "root"
         self.root.mkdir()
-        self.db_path = Path(self.tmp.name) / "duviz.db"
-        self.service = DuvizService(db_path=self.db_path, max_workers=4)
+        self.db_path = Path(self.tmp.name) / "dux.db"
+        self.service = DuxService(db_path=self.db_path, max_workers=4)
 
     def tearDown(self) -> None:
         self.service.close()

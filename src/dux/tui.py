@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from .service import DuvizService
+from .service import DuxService
 
 
 def _human_bytes(size: int) -> str:
@@ -42,7 +42,7 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
     except ImportError as exc:
         raise SystemExit("textual is required for `dux ui`; install project dependencies first") from exc
 
-    class DuvizTable(DataTable):
+    class DuxTable(DataTable):
         def on_key(self, event) -> None:
             if event.key in {"q", "ctrl+c"}:
                 event.stop()
@@ -87,7 +87,7 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
         def key_escape(self) -> None:
             self.dismiss(False)
 
-    class DuvizApp(App[None]):
+    class DuxApp(App[None]):
         CSS = """
         Screen {
             background: #0f1720;
@@ -129,7 +129,7 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
 
         def __init__(self) -> None:
             super().__init__()
-            self.service = DuvizService(db_path=db_path, max_workers=workers)
+            self.service = DuxService(db_path=db_path, max_workers=workers)
             self.current_path = self.service.canonical(path)
             self.service.ensure_navigation_path(self.current_path)
             self.sort_by = "size"
@@ -141,7 +141,7 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
         def compose(self) -> ComposeResult:
             yield Header()
             yield Static("Ready", id="status")
-            yield DuvizTable(id="table")
+            yield DuxTable(id="table")
             yield Footer()
 
         def action_request_quit(self) -> None:
@@ -445,4 +445,4 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
                 self.notify(f"Delete finished: {len(completed)} item(s)")
             self._reload_table()
 
-    DuvizApp().run()
+    DuxApp().run()

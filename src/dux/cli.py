@@ -5,7 +5,7 @@ import sys
 import time
 from pathlib import Path
 
-from .service import DuvizService
+from .service import DuxService
 from .tui import run_ui
 
 
@@ -54,7 +54,7 @@ def main(argv: list[str] | None = None) -> int:
         run_ui(args.db, args.path, args.workers)
         return 0
 
-    service = DuvizService(db_path=args.db, max_workers=args.workers)
+    service = DuxService(db_path=args.db, max_workers=args.workers)
     try:
         if args.command == "index":
             def report_progress(count: int, path: str) -> None:

@@ -17,7 +17,7 @@ That design is compact, but it makes local refresh tricky:
 
 ## New storage model
 
-`duviz` uses a path-keyed adjacency tree in SQLite:
+`dux` uses a path-keyed adjacency tree in SQLite:
 
 - one row per path
 - `path` is the primary key
