@@ -50,13 +50,16 @@ The UI resolves `mtime` on demand only for currently visible children.
 
 Refreshing `/a/b/c` does:
 
-1. scan subtree `/a/b/c`
-2. build a new in-memory node map for that subtree
-3. replace rows for `/a/b/c` and descendants
-4. compute `delta = new_root_agg - old_root_agg`
-5. apply delta to `/a/b`, `/a`, and so on until the indexed root
+1. scan subtree `/a/b/c` into a temporary staging SQLite database
+2. aggregate the staging subtree bottom-up
+3. attach the staging database to the main database
+4. in one short main-database transaction, replace rows for `/a/b/c` and descendants
+5. compute `delta = new_root_agg - old_root_agg`
+6. apply delta to `/a/b`, `/a`, and so on until the indexed root
 
 That gives local refresh with explicit parent consistency.
+
+The important concurrency property is that the long filesystem scan does not hold a write transaction on the main database. The UI can keep reading the previous committed snapshot while indexing is running. The main database is locked only during the final subtree swap.
 
 ## Concurrency model
 
@@ -67,11 +70,14 @@ The scanner uses worker threads with `os.scandir()`:
 - each worker reads one directory
 - files are recorded immediately
 - child directories are queued
-- aggregation is done after traversal, bottom-up in memory
+- scan rows are written to the staging database in batches
+- aggregation is done after traversal, bottom-up in SQLite
 
 This keeps the implementation simple and usually improves throughput over a single-threaded walker.
 
 `asyncio` is not a good fit for raw filesystem syscalls here because Python filesystem APIs are blocking. Threads are the more honest tool.
+
+SQLite still permits only one writer at a time. `dux` avoids long writer lock windows by using a staging database for indexing and a `busy_timeout` for short write contention during schema setup, deletion, and final swaps.
 
 ## Why not delegate to `du`
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 import sys
@@ -35,6 +36,37 @@ class ServiceTests(unittest.TestCase):
         by_name = {row["name"]: row for row in rows}
         self.assertEqual(by_name["sub"]["size_bytes"], 20)
         self.assertEqual(by_name["sub"]["file_count"], 1)
+
+    def test_index_scan_keeps_main_db_readable(self) -> None:
+        sub = self.root / "sub"
+        sub.mkdir()
+        (sub / "old.bin").write_bytes(b"a" * 100)
+        self.service.index_path(str(self.root))
+        for index in range(20):
+            (sub / f"new-{index}.bin").write_bytes(b"b" * 10)
+        (sub / "old.bin").unlink()
+
+        reader = DuxService(db_path=self.db_path, max_workers=1)
+        observed: list[int] = []
+        observed_lock = threading.Lock()
+        try:
+            def progress(_count: int, _path: str) -> None:
+                with observed_lock:
+                    if observed:
+                        return
+                    rows = reader.list_children(str(self.root))
+                    reader.ensure_navigation_path(str(self.root))
+                    by_name = {row["name"]: row for row in rows}
+                    observed.append(int(by_name["sub"]["file_count"]))
+
+            self.service.index_path(str(sub), progress=progress, progress_interval=1)
+
+            self.assertEqual(observed, [1])
+            rows = self.service.list_children(str(self.root))
+            by_name = {row["name"]: row for row in rows}
+            self.assertEqual(by_name["sub"]["file_count"], 20)
+        finally:
+            reader.close()
 
     def test_delete_propagates_to_parent(self) -> None:
         sub = self.root / "sub"

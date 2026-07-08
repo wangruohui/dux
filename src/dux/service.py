@@ -5,6 +5,7 @@ import queue
 import shutil
 import sqlite3
 import stat
+import tempfile
 import threading
 import time
 from collections import defaultdict
@@ -45,30 +46,28 @@ class DuxService:
         progress_interval: int = 10000,
     ) -> IndexResult:
         root = self.canonical(path)
-        old_root = db.fetch_node(self.conn, root)
-        old_size = int(old_root["size_bytes"]) if old_root else 0
-        old_files = int(old_root["file_count"]) if old_root else 0
-        old_dirs = int(old_root["dir_count"]) if old_root else 0
-
-        with self.conn:
-            db.ensure_ancestor_placeholders(self.conn, root)
-            db.delete_subtree_rows(self.conn, root)
-            scan = scan_subtree_to_db(
-                self.conn,
-                root,
-                max_workers=self.max_workers,
-                progress=progress,
-                progress_interval=progress_interval,
-            )
-            db.aggregate_subtree(self.conn, root)
-            new_root = db.fetch_node(self.conn, root)
-            if new_root is None:
-                raise FileNotFoundError(root)
-            size_delta = int(new_root["size_bytes"]) - old_size
-            file_delta = int(new_root["file_count"]) - old_files
-            dir_delta = int(new_root["dir_count"]) - old_dirs
-            if size_delta or file_delta or dir_delta:
-                db.apply_delta_to_ancestors(self.conn, root, size_delta, file_delta, dir_delta)
+        staging_path = self._create_staging_db_path()
+        try:
+            staging_conn = db.connect(staging_path)
+            try:
+                with staging_conn:
+                    scan = scan_subtree_to_db(
+                        staging_conn,
+                        root,
+                        max_workers=self.max_workers,
+                        progress=progress,
+                        progress_interval=progress_interval,
+                    )
+                    db.aggregate_subtree(staging_conn, root)
+                    new_root = db.fetch_node(staging_conn, root)
+                    if new_root is None:
+                        raise FileNotFoundError(root)
+                staging_conn.execute("PRAGMA wal_checkpoint(FULL)")
+            finally:
+                staging_conn.close()
+            self._swap_indexed_subtree(root, staging_path, new_root)
+        finally:
+            self._remove_staging_db(staging_path)
 
         root_record = NodeRecord(
             path=new_root["path"],
@@ -82,6 +81,45 @@ class DuxService:
             dir_count=int(new_root["dir_count"]),
         )
         return IndexResult(root=root_record, scan=scan)
+
+    def _swap_indexed_subtree(self, root: str, staging_path: Path, new_root: sqlite3.Row) -> None:
+        alias = "staging_index"
+        attached = False
+        db.attach_database(self.conn, staging_path, alias)
+        attached = True
+        try:
+            new_size = int(new_root["size_bytes"])
+            new_files = int(new_root["file_count"])
+            new_dirs = int(new_root["dir_count"])
+
+            with self.conn:
+                old_root = db.fetch_node(self.conn, root)
+                old_size = int(old_root["size_bytes"]) if old_root else 0
+                old_files = int(old_root["file_count"]) if old_root else 0
+                old_dirs = int(old_root["dir_count"]) if old_root else 0
+                db.ensure_ancestor_placeholders(self.conn, root)
+                db.delete_subtree_rows(self.conn, root)
+                db.insert_subtree_from_attached(self.conn, alias, root)
+                size_delta = new_size - old_size
+                file_delta = new_files - old_files
+                dir_delta = new_dirs - old_dirs
+                if size_delta or file_delta or dir_delta:
+                    db.apply_delta_to_ancestors(self.conn, root, size_delta, file_delta, dir_delta)
+        finally:
+            if attached:
+                db.detach_database(self.conn, alias)
+
+    def _create_staging_db_path(self) -> Path:
+        handle = tempfile.NamedTemporaryFile(prefix="dux-index-", suffix=".db", delete=False)
+        handle.close()
+        return Path(handle.name)
+
+    def _remove_staging_db(self, path: Path) -> None:
+        for suffix in ("", "-wal", "-shm"):
+            try:
+                path.with_name(path.name + suffix).unlink()
+            except FileNotFoundError:
+                pass
 
     def delete_path(
         self,

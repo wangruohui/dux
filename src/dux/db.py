@@ -36,8 +36,9 @@ CREATE INDEX IF NOT EXISTS idx_nodes_depth ON nodes(depth);
 def connect(db_path: str | Path | None = None) -> sqlite3.Connection:
     path = Path(db_path or DEFAULT_DB_PATH).expanduser()
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path, check_same_thread=False)
+    conn = sqlite3.connect(path, check_same_thread=False, timeout=60.0)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=60000")
     conn.executescript(SCHEMA)
     _migrate(conn)
     return conn
@@ -166,6 +167,28 @@ def delete_subtree_rows(conn: sqlite3.Connection, root_path: str) -> None:
     child_upper = f"{root_path}0"
     conn.execute(
         "DELETE FROM nodes WHERE path = ? OR (path >= ? AND path < ?)",
+        (root_path, child_lower, child_upper),
+    )
+
+
+def attach_database(conn: sqlite3.Connection, db_path: str | Path, alias: str) -> None:
+    conn.execute(f"ATTACH DATABASE ? AS {alias}", (str(db_path),))
+
+
+def detach_database(conn: sqlite3.Connection, alias: str) -> None:
+    conn.execute(f"DETACH DATABASE {alias}")
+
+
+def insert_subtree_from_attached(conn: sqlite3.Connection, alias: str, root_path: str) -> None:
+    child_lower = f"{root_path}/"
+    child_upper = f"{root_path}0"
+    conn.execute(
+        f"""
+        INSERT INTO nodes(path, parent_path, name, is_dir, indexed, depth, size_bytes, file_count, dir_count, updated_at)
+        SELECT path, parent_path, name, is_dir, indexed, depth, size_bytes, file_count, dir_count, updated_at
+        FROM {alias}.nodes
+        WHERE path = ? OR (path >= ? AND path < ?)
+        """,
         (root_path, child_lower, child_upper),
     )
 
