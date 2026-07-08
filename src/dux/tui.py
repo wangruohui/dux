@@ -62,9 +62,9 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
             elif event.key == "space":
                 event.stop()
                 self.app.action_toggle_select()
-            elif event.key == "shift+delete":
+            elif event.key in {"delete", "shift+delete"}:
                 event.stop()
-                self.app.action_delete_marked()
+                self.app.action_delete_requested()
 
     class ConfirmScreen(ModalScreen[bool]):
         def __init__(self, message: str) -> None:
@@ -118,9 +118,8 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
             Binding("backspace", "go_parent", "Up"),
             Binding("r", "refresh_current", "Refresh"),
             Binding("space", "toggle_select", "Select"),
-            Binding("d", "trash_selected", "Trash"),
-            Binding("D", "delete_selected", "Delete"),
-            Binding("shift+delete", "delete_marked", "Delete Marked"),
+            Binding("delete", "delete_requested", "Delete"),
+            Binding("shift+delete", "delete_requested", "Delete"),
             Binding("s", "sort_size", "Sort Size"),
             Binding("c", "sort_count", "Sort Count"),
             Binding("m", "sort_mtime", "Sort Date"),
@@ -322,36 +321,12 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
             self.reverse = False
             self._reload_table()
 
-        def action_trash_selected(self) -> None:
-            selected = self._selected_path()
-            if not selected:
-                return
-            if self.delete_active:
-                self.notify("Delete is already running.", severity="warning")
-                return
-
-            def after(confirm: bool) -> None:
-                if confirm:
-                    self._start_delete([selected], permanent=False, trash=True)
-
-            self.push_screen(ConfirmScreen(f"Move to trash?\n{selected}"), after)
-
-        def action_delete_selected(self) -> None:
-            selected = self._selected_path()
-            if not selected:
-                return
-            if self.delete_active:
-                self.notify("Delete is already running.", severity="warning")
-                return
-
-            def after(confirm: bool) -> None:
-                if confirm:
-                    self._start_delete([selected], permanent=True, trash=False)
-
-            self.push_screen(ConfirmScreen(f"Permanently delete?\n{selected}"), after)
-
-        def action_delete_marked(self) -> None:
+        def action_delete_requested(self) -> None:
             targets = self._marked_delete_roots()
+            if not targets:
+                selected = self._selected_path()
+                if selected:
+                    targets = [selected]
             if not targets:
                 return
             if self.delete_active:
@@ -359,8 +334,9 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
                 return
             preview = "\n".join(targets[:20])
             suffix = "" if len(targets) <= 20 else f"\n... and {len(targets) - 20} more"
+            target_text = "selected item(s)" if self.marked_paths else "current item"
             message = (
-                f"Permanently delete {len(targets)} selected item(s)?\n"
+                f"Permanently delete {len(targets)} {target_text}?\n"
                 f"{preview}{suffix}\n\n"
                 "Press y to confirm, n or Esc to cancel."
             )

@@ -17,8 +17,8 @@ Path: /data/project                         Sort: size
 │   9.7G   │    14,006 │ 2026-06-22 │ tmp/                         │ [                ] │
 └──────────┴───────────┴────────────┴──────────────────────────────┴────────────────────┘
 
-Enter open  Backspace parent  Space select  Shift+Del delete selected
-s size  c count  m date  n name  r refresh  d trash  D delete  q quit
+Enter open  Backspace parent  Space select  Del/Shift+Del delete
+s size  c count  m date  n name  r refresh  q quit
 ```
 
 `dux` answers the cleanup question quickly: what is using space, how many files are there, what changed, and what can be safely removed?
@@ -39,14 +39,14 @@ s size  c count  m date  n name  r refresh  d trash  D delete  q quit
 - **局部刷新**：对变化的子树重新 `index` 即可，父路径聚合值会自动更新。
 - **Partial navigation**: ancestors of indexed subtrees are kept as navigation placeholders; unindexed live entries are shown as `unindexed`.
 - **部分索引导航**：已统计子树的父路径会保留导航骨架，未统计的现场条目标记为 `unindexed`。
-- **Selection and batch delete**: use `Space` to mark rows and `Shift+Delete` to delete selected items after confirmation.
-- **多选批量删除**：`Space` 标记多行，`Shift+Delete` 确认后批量永久删除。
+- **Cursor and batch delete**: use `Delete` or `Shift+Delete` to delete the current row, or `Space` to mark multiple rows and delete them together.
+- **光标和批量删除**：`Delete` 或 `Shift+Delete` 删除当前行；也可以用 `Space` 标记多行后一起删除。
 - **Responsive deletion**: deletion runs in background workers with a status line showing progress, rate, current path, and index-update phase.
 - **响应式删除**：删除在后台 worker 中执行，状态栏会显示进度、速度、当前路径和索引更新阶段。
 - **Parallel cleanup**: multiple selected roots can be deleted concurrently; each directory tree is scanned and unlinked with worker threads.
 - **并行清理**：多个选中根目录可以并发删除；单个目录树内部也会用 worker 线程并行扫描和 unlink。
-- **Safe trash flow**: move a single item to `~/trash` with `d`, or explicitly choose permanent deletion.
-- **安全清理流程**：单项可用 `d` 移动到 `~/trash`，永久删除需要明确触发。
+- **Explicit confirmation**: destructive UI deletes always show a confirmation dialog before running.
+- **明确确认**：UI 中的破坏性删除都会先弹出确认框。
 - **Persistent default database**: default DB is `~/.cache/dux/dux.db`; use `--db` for project-specific indexes.
 - **默认持久数据库**：默认数据库是 `~/.cache/dux/dux.db`，也可以用 `--db` 指定项目数据库。
 - **Simple install**: Python + SQLite; no desktop stack or custom C database runtime required.
@@ -133,12 +133,8 @@ dux --workers 16 index /data/project
 - `Backspace` / `Left`：返回父目录。
 - `Space`: select or unselect the current row; selected rows are highlighted and prefixed with `[x]`.
 - `Space`：选择或取消选择当前行；选中行会高亮并显示 `[x]`。
-- `Shift+Delete`: open a confirmation dialog for selected rows; press `y` to confirm, `n` or `Esc` to cancel.
-- `Shift+Delete`：打开选中项删除确认弹窗；按 `y` 确认，按 `n` 或 `Esc` 取消。
-- `d`: move the current row to `~/trash`.
-- `d`：把当前项移动到 `~/trash`。
-- `D`: permanently delete the current row after confirmation.
-- `D`：确认后永久删除当前项。
+- `Delete` / `Shift+Delete`: delete marked rows if any rows are marked; otherwise delete the current row. Press `y` to confirm, `n` or `Esc` to cancel.
+- `Delete` / `Shift+Delete`：如果有标记行，则删除所有标记行；否则删除当前光标行。按 `y` 确认，按 `n` 或 `Esc` 取消。
 - `r`: refresh the current subtree.
 - `r`：刷新当前子树。
 - `s`: sort by size.
