@@ -36,9 +36,16 @@ class FilterResult:
 
 
 class DuxService:
-    def __init__(self, db_path: str | Path | None = None, max_workers: int = 256) -> None:
-        self.conn = db.connect(db_path)
+    def __init__(
+        self,
+        db_path: str | Path | None = None,
+        max_workers: int = 256,
+        delete_slots: threading.BoundedSemaphore | None = None,
+    ) -> None:
+        self.db_path = Path(db_path or db.DEFAULT_DB_PATH).expanduser()
+        self.conn = db.connect(self.db_path)
         self.max_workers = max_workers
+        self.delete_slots = delete_slots or threading.BoundedSemaphore(256)
 
     def close(self) -> None:
         self.conn.close()
@@ -482,7 +489,8 @@ class DuxService:
             if progress:
                 progress(count, str(target))
         else:
-            target.unlink()
+            with self.delete_slots:
+                target.unlink()
             if progress:
                 progress(1, str(target))
 
@@ -501,6 +509,7 @@ class DuxService:
     ) -> int:
         worker_count = max(1, workers)
         dir_queue: queue.Queue[Path | None] = queue.Queue()
+        unlink_queue: queue.Queue[str | None] = queue.Queue(maxsize=worker_count * 16)
         dir_queue.put(target)
         dirs: list[Path] = []
         dirs_lock = threading.Lock()
@@ -524,6 +533,14 @@ class DuxService:
                     errors.append(exc)
             stop_event.set()
 
+        def queue_unlink(path: str) -> None:
+            while not stop_event.is_set():
+                try:
+                    unlink_queue.put(path, timeout=0.1)
+                    return
+                except queue.Full:
+                    continue
+
         def scan_worker() -> None:
             while True:
                 current_dir = dir_queue.get()
@@ -535,31 +552,65 @@ class DuxService:
                     with dirs_lock:
                         dirs.append(current_dir)
                     try:
-                        with os.scandir(current_dir) as entries:
-                            for entry in entries:
-                                if stop_event.is_set():
-                                    break
-                                try:
+                        child_dirs: list[Path] = []
+                        child_files: list[str] = []
+                        with self.delete_slots:
+                            with os.scandir(current_dir) as entries:
+                                for entry in entries:
+                                    if stop_event.is_set():
+                                        break
                                     if entry.is_dir(follow_symlinks=False):
-                                        dir_queue.put(Path(entry.path))
+                                        child_dirs.append(Path(entry.path))
                                     else:
-                                        os.unlink(entry.path)
-                                        bump(entry.path)
-                                except BaseException as exc:
-                                    record_error(exc)
-                                    break
+                                        child_files.append(entry.path)
+                        for child_dir in child_dirs:
+                            dir_queue.put(child_dir)
+                        for child_file in child_files:
+                            queue_unlink(child_file)
                     except BaseException as exc:
                         record_error(exc)
                 finally:
                     dir_queue.task_done()
 
-        with ThreadPoolExecutor(max_workers=worker_count) as pool:
-            futures = [pool.submit(scan_worker) for _ in range(worker_count)]
+        def unlink_worker() -> None:
+            while True:
+                path = unlink_queue.get()
+                try:
+                    if path is None:
+                        return
+                    if stop_event.is_set():
+                        continue
+                    try:
+                        with self.delete_slots:
+                            self._unlink_path(Path(path))
+                        bump(path)
+                    except BaseException as exc:
+                        record_error(exc)
+                finally:
+                    unlink_queue.task_done()
+
+        if worker_count == 1:
+            scan_worker_count = 1
+            unlink_worker_count = 1
+        else:
+            scan_worker_count = min(32, max(1, worker_count // 8))
+            unlink_worker_count = worker_count - scan_worker_count
+
+        pool_worker_count = scan_worker_count + unlink_worker_count
+        with ThreadPoolExecutor(max_workers=pool_worker_count) as pool:
+            scan_futures = [pool.submit(scan_worker) for _ in range(scan_worker_count)]
+            unlink_futures = [pool.submit(unlink_worker) for _ in range(unlink_worker_count)]
             dir_queue.join()
-            for _ in futures:
+            for _ in scan_futures:
                 dir_queue.put(None)
             dir_queue.join()
-            for future in futures:
+            unlink_queue.join()
+            for _ in unlink_futures:
+                unlink_queue.put(None)
+            unlink_queue.join()
+            for future in scan_futures:
+                future.result()
+            for future in unlink_futures:
                 future.result()
 
         if errors:
@@ -571,10 +622,17 @@ class DuxService:
 
         with ThreadPoolExecutor(max_workers=worker_count) as pool:
             for depth in sorted(dirs_by_depth, reverse=True):
-                future_to_dir = {pool.submit(Path.rmdir, dir_path): dir_path for dir_path in dirs_by_depth[depth]}
+                future_to_dir = {
+                    pool.submit(self._rmdir_with_slot, dir_path): dir_path
+                    for dir_path in dirs_by_depth[depth]
+                }
                 for future in as_completed(future_to_dir):
                     dir_path = future_to_dir[future]
                     future.result()
                     bump(str(dir_path))
 
         return count
+
+    def _rmdir_with_slot(self, path: Path) -> None:
+        with self.delete_slots:
+            path.rmdir()

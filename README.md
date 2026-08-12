@@ -133,8 +133,8 @@ dux --workers 16 index /data/project
 - `Backspace` / `Left`：返回父目录。
 - `Space`: select or unselect the current row; selected rows are highlighted and prefixed with `[x]`.
 - `Space`：选择或取消选择当前行；选中行会高亮并显示 `[x]`。
-- `Delete` / `Shift+Delete`: delete marked rows if any rows are marked; otherwise delete the current row. Press `y` to confirm, `n` or `Esc` to cancel.
-- `Delete` / `Shift+Delete`：如果有标记行，则删除所有标记行；否则删除当前光标行。按 `y` 确认，按 `n` 或 `Esc` 取消。
+- `Delete` / `Shift+Delete`: delete marked rows if any rows are marked; otherwise delete the current row. Files within a directory and multiple delete jobs run concurrently while sharing a global concurrency limit of 256. Press `y` to confirm, `n` or `Esc` to cancel.
+- `Delete` / `Shift+Delete`：如果有标记行，则删除所有标记行；否则删除当前光标行。目录内部文件和多个删除任务都会并行删除，并共享全局 256 并发限制。按 `y` 确认，按 `n` 或 `Esc` 取消。
 - `r`: refresh the current subtree.
 - `r`：刷新当前子树。
 - `f`: recursively find exact file/directory names below the current directory, with optional exclude-path pruning; select results with `Space` and continue with `Enter`.
@@ -165,6 +165,10 @@ During deletion, the status line reports the active phase. File removal shows a 
 Filter matching is case-sensitive and compares the complete file or directory name. When a directory matches, it is returned and its descendants are not scanned, following `find ... -prune` semantics. If the relative path contains the exclude keyword, that entry is skipped; excluded directories are not entered.
 
 筛选按大小写敏感的完整文件名或目录名匹配。目录命中后返回该目录且不再扫描其子目录，语义与 `find ... -prune` 一致。相对路径包含 exclude 关键字的条目会被跳过，其中目录不会继续进入。
+
+In the filtered-result delete confirmation, `n` or `Esc` returns to the result table with the previous selections preserved; only `y` closes the result table and starts deletion.
+
+在筛选结果的删除确认中，按 `n` 或 `Esc` 会返回结果表并保留原选择；只有按 `y` 才会关闭结果表并开始删除。
 
 ## Indexing Semantics / 索引语义
 

@@ -211,7 +211,20 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
             if not self.selected_paths:
                 self.app.notify("Select at least one filter result.", severity="warning")
                 return
-            self.dismiss(sorted(self.selected_paths))
+            selected = sorted(self.selected_paths)
+            preview = "\n".join(selected[:20])
+            suffix = "" if len(selected) <= 20 else f"\n... and {len(selected) - 20} more"
+            message = (
+                f"Permanently delete {len(selected)} filtered item(s)?\n"
+                f"{preview}{suffix}\n\n"
+                "Press y to confirm, n or Esc to return to selection."
+            )
+
+            def after_confirm(confirm: bool) -> None:
+                if confirm:
+                    self.dismiss(selected)
+
+            self.app.push_screen(ConfirmScreen(message), after_confirm)
 
     class DuxApp(App[None]):
         CSS = """
@@ -288,8 +301,16 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
             self.reverse = True
             self.rows_by_key: dict[str, bool] = {}
             self.marked_paths: set[str] = set()
-            self.delete_active = False
+            self.delete_slots = threading.BoundedSemaphore(256)
+            self.delete_jobs: dict[int, str] = {}
+            self.deleting_paths: set[str] = set()
+            self.next_delete_job_id = 1
+            self.delete_jobs_lock = threading.Lock()
             self.filter_active = False
+
+        @property
+        def delete_active(self) -> bool:
+            return bool(self.delete_jobs)
 
         def compose(self) -> ComposeResult:
             yield Header()
@@ -465,10 +486,6 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
             if self.filter_active:
                 self.notify("Filter is already running.", severity="warning")
                 return
-            if self.delete_active:
-                self.notify("Delete is still running.", severity="warning")
-                return
-
             def after_query(query: tuple[str, str] | None) -> None:
                 if query is None:
                     return
@@ -551,19 +568,7 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
             def after_results(selected: list[str] | None) -> None:
                 if not selected:
                     return
-                preview = "\n".join(selected[:20])
-                suffix = "" if len(selected) <= 20 else f"\n... and {len(selected) - 20} more"
-                message = (
-                    f"Permanently delete {len(selected)} filtered item(s)?\n"
-                    f"{preview}{suffix}\n\n"
-                    "Press y to confirm, n or Esc to cancel."
-                )
-
-                def after_confirm(confirm: bool) -> None:
-                    if confirm:
-                        self._start_delete(selected, permanent=True, trash=False)
-
-                self.push_screen(ConfirmScreen(message), after_confirm)
+                self._start_delete(selected, permanent=True, trash=False)
 
             self.push_screen(FilterResultsScreen(root, paths), after_results)
 
@@ -592,9 +597,6 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
                     targets = [selected]
             if not targets:
                 return
-            if self.delete_active:
-                self.notify("Delete is already running.", severity="warning")
-                return
             preview = "\n".join(targets[:20])
             suffix = "" if len(targets) <= 20 else f"\n... and {len(targets) - 20} more"
             target_text = "selected item(s)" if self.marked_paths else "current item"
@@ -612,21 +614,69 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
             self.push_screen(ConfirmScreen(message), after)
 
         def _start_delete(self, targets: list[str], *, permanent: bool, trash: bool) -> None:
-            self.delete_active = True
+            with self.delete_jobs_lock:
+                conflicts = [
+                    target
+                    for target in targets
+                    if any(
+                        target == active
+                        or target.startswith(active.rstrip("/") + "/")
+                        or active.startswith(target.rstrip("/") + "/")
+                        for active in self.deleting_paths
+                    )
+                ]
+                if conflicts:
+                    self.notify(
+                        f"Already deleting overlapping path: {conflicts[0]}",
+                        severity="warning",
+                    )
+                    return
+                job_id = self.next_delete_job_id
+                self.next_delete_job_id += 1
+                self.deleting_paths.update(targets)
+                self.delete_jobs[job_id] = f"queued {len(targets)} item(s)"
             action = "Moving to trash" if trash else "Deleting"
-            self._set_status(f"{action} {len(targets)} item(s)...")
-            self.notify(f"{action} {len(targets)} item(s). UI remains responsive.")
+            self._show_delete_job_status(job_id, f"{action} {len(targets)} item(s)...")
+            self.notify(
+                f"Delete job {job_id}: {action.lower()} {len(targets)} item(s). UI remains responsive."
+            )
             self.run_worker(
-                lambda: self._delete_worker(targets, permanent=permanent, trash=trash),
+                lambda: self._delete_worker(job_id, targets, permanent=permanent, trash=trash),
                 thread=True,
+                exclusive=False,
             )
 
-        def _delete_worker(self, targets: list[str], *, permanent: bool, trash: bool) -> None:
+        def _show_delete_job_status(self, job_id: int, message: str) -> None:
+            with self.delete_jobs_lock:
+                if job_id in self.delete_jobs:
+                    self.delete_jobs[job_id] = message
+                active_count = len(self.delete_jobs)
+            self._set_status(f"Delete jobs={active_count} | job {job_id}: {message}")
+
+        def _delete_worker(
+            self,
+            job_id: int,
+            targets: list[str],
+            *,
+            permanent: bool,
+            trash: bool,
+        ) -> None:
             completed: list[str] = []
+            delete_service = DuxService(
+                db_path=self.service.db_path,
+                max_workers=self.service.max_workers,
+                delete_slots=self.delete_slots,
+            )
             try:
                 action = "Moving" if trash else "Deleting"
-                self.call_from_thread(self._set_status, f"{action} {len(targets)} item(s) with 2 workers...")
-                totals = {target: self._delete_total(target) for target in targets}
+                target_workers = min(8, max(1, len(targets)))
+                unlink_workers = max(1, 256 // target_workers)
+                self.call_from_thread(
+                    self._show_delete_job_status,
+                    job_id,
+                    f"{action} {len(targets)} item(s), concurrency=256",
+                )
+                totals = {target: self._delete_total(delete_service, target) for target in targets}
                 started_at = time.monotonic()
                 latest_counts = {target: 0 for target in targets}
                 progress_lock = threading.Lock()
@@ -643,40 +693,56 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
                     pct_text = "" if total is None else f" {min(100.0, processed * 100.0 / total):5.1f}%"
                     eta_text = " ETA=?" if total is None or rate <= 0 else f" ETA={_eta((total - processed) / rate)}"
                     self.call_from_thread(
-                        self._set_status,
+                        self._show_delete_job_status,
+                        job_id,
                         f"Deleting {_progress_bar(processed, total)}{pct_text} "
                         f"{processed}/{total_text} {rate:.1f}/s{eta_text} current={path}",
                     )
 
                 def status(target: str, phase: str) -> None:
                     if phase == "updating-index":
-                        self.call_from_thread(self._set_status, f"Updating index after delete: {target}")
+                        self.call_from_thread(
+                            self._show_delete_job_status, job_id, f"Updating index: {target}"
+                        )
                     elif phase == "index-updated":
-                        self.call_from_thread(self._set_status, f"Index updated after delete: {target}")
+                        self.call_from_thread(
+                            self._show_delete_job_status, job_id, f"Index updated: {target}"
+                        )
 
-                self.service.delete_paths(
+                delete_service.delete_paths(
                     targets,
                     permanent=permanent,
                     trash=trash,
                     progress=None if trash else progress,
                     status=status,
                     progress_interval=1000,
-                    workers=2,
-                    unlink_workers=16,
+                    workers=target_workers,
+                    unlink_workers=unlink_workers,
                 )
                 completed = targets
-                self.call_from_thread(self._finish_delete, targets, completed, None)
+                self.call_from_thread(self._finish_delete, job_id, targets, completed, None)
             except Exception as exc:
-                self.call_from_thread(self._finish_delete, targets, completed, exc)
+                self.call_from_thread(self._finish_delete, job_id, targets, completed, exc)
+            finally:
+                delete_service.close()
 
-        def _delete_total(self, target: str) -> int | None:
-            row = self.service.get_node(target)
+        def _delete_total(self, service: DuxService, target: str) -> int | None:
+            row = service.get_node(target)
             if row is None:
                 return None
             return int(row["file_count"]) + int(row["dir_count"]) + 1
 
-        def _finish_delete(self, targets: list[str], completed: list[str], error: Exception | None) -> None:
-            self.delete_active = False
+        def _finish_delete(
+            self,
+            job_id: int,
+            targets: list[str],
+            completed: list[str],
+            error: Exception | None,
+        ) -> None:
+            with self.delete_jobs_lock:
+                self.delete_jobs.pop(job_id, None)
+                self.deleting_paths.difference_update(targets)
+                remaining_jobs = len(self.delete_jobs)
             for target in completed:
                 self.marked_paths.discard(target)
             self.marked_paths = {
@@ -685,11 +751,15 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
                 if not any(path == target or path.startswith(target.rstrip("/") + "/") for target in completed)
             }
             if error is not None:
-                self._set_status(f"Delete failed after {len(completed)}/{len(targets)} item(s): {error}")
-                self.notify(f"Delete failed: {error}", severity="error")
+                self._set_status(
+                    f"Delete job {job_id} failed; active jobs={remaining_jobs}: {error}"
+                )
+                self.notify(f"Delete job {job_id} failed: {error}", severity="error")
             else:
-                self._set_status(f"Delete finished: {len(completed)} item(s)")
-                self.notify(f"Delete finished: {len(completed)} item(s)")
+                self._set_status(
+                    f"Delete job {job_id} finished: {len(completed)} item(s); active jobs={remaining_jobs}"
+                )
+                self.notify(f"Delete job {job_id} finished: {len(completed)} item(s)")
             self._reload_table()
 
     DuxApp().run()

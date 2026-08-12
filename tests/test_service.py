@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 import sys
@@ -203,6 +204,35 @@ class ServiceTests(unittest.TestCase):
         self.assertFalse(sub.exists())
         self.assertGreaterEqual(len(progress), 3)
         self.assertEqual(progress[-1][1], str(sub))
+
+    def test_flat_directory_files_are_unlinked_in_parallel(self) -> None:
+        sub = self.root / "flat"
+        sub.mkdir()
+        for index in range(300):
+            (sub / f"file-{index}.bin").write_bytes(b"x")
+        self.service.index_path(str(self.root))
+        active = 0
+        max_active = 0
+        active_lock = threading.Lock()
+        original_unlink = self.service._unlink_path
+
+        def tracked_unlink(path: Path) -> str:
+            nonlocal active, max_active
+            with active_lock:
+                active += 1
+                max_active = max(max_active, active)
+            try:
+                time.sleep(0.02)
+                return original_unlink(path)
+            finally:
+                with active_lock:
+                    active -= 1
+
+        self.service._unlink_path = tracked_unlink
+        self.service.delete_path(str(sub), permanent=True, unlink_workers=256)
+
+        self.assertFalse(sub.exists())
+        self.assertGreaterEqual(max_active, 128)
 
     def test_parallel_delete_paths_updates_index(self) -> None:
         left = self.root / "left"
