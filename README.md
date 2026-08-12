@@ -131,10 +131,10 @@ dux --workers 16 index /data/project
 - `Enter` / `Right`：进入当前目录。
 - `Backspace` / `Left`: go to parent directory.
 - `Backspace` / `Left`：返回父目录。
-- `Space`: select or unselect the current row; selected rows are highlighted and prefixed with `[x]`.
-- `Space`：选择或取消选择当前行；选中行会高亮并显示 `[x]`。
-- `Delete` / `Shift+Delete`: delete marked rows if any rows are marked; otherwise delete the current row. Files within a directory and multiple delete jobs run concurrently while sharing a global concurrency limit of 256. Press `y` to confirm, `n` or `Esc` to cancel.
-- `Delete` / `Shift+Delete`：如果有标记行，则删除所有标记行；否则删除当前光标行。目录内部文件和多个删除任务都会并行删除，并共享全局 256 并发限制。按 `y` 确认，按 `n` 或 `Esc` 取消。
+- `Space`: select or unselect the current row; selected rows are highlighted and prefixed with `[x]`. Selections are scoped to the current directory page and are cleared when entering a child or returning to the parent.
+- `Space`：选择或取消选择当前行；选中行会高亮并显示 `[x]`。选择仅限当前目录页面，进入子目录或返回父目录时会清空。
+- `Delete` / `Shift+Delete`: delete marked rows visible on the current page; otherwise delete the current row. Hidden selections from another directory are never included. Files within a directory and multiple delete jobs run concurrently while sharing a global concurrency limit of 256. Press `y` to confirm, `n` or `Esc` to cancel.
+- `Delete` / `Shift+Delete`：只删除当前页面中可见的已选行；否则删除当前光标行，其他目录中的隐藏选择绝不会被带入。目录内部文件和多个删除任务都会并行删除，并共享全局 256 并发限制。按 `y` 确认，按 `n` 或 `Esc` 取消。
 - `r`: refresh the current subtree.
 - `r`：刷新当前子树。
 - `f`: recursively find file/directory basenames using shell globs such as `a*`, with optional exclude-path pruning; it remains available while deletion runs.

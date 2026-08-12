@@ -455,7 +455,8 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
 
         def _marked_delete_roots(self) -> list[str]:
             roots: list[str] = []
-            for path in sorted(self.marked_paths, key=lambda item: (item.count("/"), item)):
+            visible_marked = self.marked_paths.intersection(self.rows_by_key)
+            for path in sorted(visible_marked, key=lambda item: (item.count("/"), item)):
                 if any(path == root or path.startswith(root.rstrip("/") + "/") for root in roots):
                     continue
                 roots.append(path)
@@ -466,12 +467,14 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
             if not selected:
                 return
             if self.rows_by_key.get(selected):
+                self.marked_paths.clear()
                 self.current_path = selected
                 self._reload_table()
 
         def action_go_parent(self) -> None:
             parent = str(Path(self.current_path).parent)
             if parent != self.current_path:
+                self.marked_paths.clear()
                 self.current_path = parent
                 self._reload_table()
 
@@ -593,6 +596,7 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
 
         def action_delete_requested(self) -> None:
             targets = self._marked_delete_roots()
+            deleting_marked = bool(targets)
             if not targets:
                 selected = self._selected_path()
                 if selected:
@@ -601,7 +605,7 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
                 return
             preview = "\n".join(targets[:20])
             suffix = "" if len(targets) <= 20 else f"\n... and {len(targets) - 20} more"
-            target_text = "selected item(s)" if self.marked_paths else "current item"
+            target_text = "selected item(s)" if deleting_marked else "current item"
             message = (
                 f"Permanently delete {len(targets)} {target_text}?\n"
                 f"{preview}{suffix}\n\n"
