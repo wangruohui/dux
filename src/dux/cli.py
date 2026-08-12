@@ -64,6 +64,9 @@ def main(argv: list[str] | None = None) -> int:
                 args.path,
                 progress=report_progress,
                 progress_interval=args.progress_interval,
+                lock_status=lambda owner: print(
+                    f"waiting_for_database_writer {owner}", file=sys.stderr, flush=True
+                ),
             )
             root = result.root
             elapsed = max(result.scan.elapsed_seconds, 0.000001)
@@ -76,7 +79,21 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 0
         if args.command == "delete":
-            dst = service.delete_path(args.path, permanent=args.permanent, trash=args.trash)
+            def report_delete_status(_target: str, phase: str) -> None:
+                if phase.startswith("waiting-lock:"):
+                    print(
+                        "waiting_for_database_writer "
+                        + phase.removeprefix("waiting-lock:"),
+                        file=sys.stderr,
+                        flush=True,
+                    )
+
+            dst = service.delete_path(
+                args.path,
+                permanent=args.permanent,
+                trash=args.trash,
+                status=report_delete_status,
+            )
             if args.trash:
                 print(f"moved_to_trash {dst}")
             else:

@@ -10,6 +10,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from dux.service import DeleteCancelled, DuxService
+from dux import db
 
 
 class ServiceTests(unittest.TestCase):
@@ -38,6 +39,85 @@ class ServiceTests(unittest.TestCase):
         by_name = {row["name"]: row for row in rows}
         self.assertEqual(by_name["sub"]["size_bytes"], 20)
         self.assertEqual(by_name["sub"]["file_count"], 1)
+
+    def test_writer_wait_reports_lock_owner(self) -> None:
+        holder = DuxService(db_path=self.db_path, max_workers=1)
+        waiter = DuxService(db_path=self.db_path, max_workers=1)
+        holder_ready = threading.Event()
+        release_holder = threading.Event()
+        reports: list[str] = []
+
+        def hold_writer_lock() -> None:
+            with db.writer_transaction(holder.conn, "test-holder", "/held/path"):
+                holder_ready.set()
+                release_holder.wait(timeout=5)
+
+        holder_thread = threading.Thread(target=hold_writer_lock)
+        holder_thread.start()
+        self.assertTrue(holder_ready.wait(timeout=5))
+
+        def wait_for_writer() -> None:
+            with db.writer_transaction(
+                waiter.conn,
+                "test-waiter",
+                "/waiting/path",
+                on_wait=reports.append,
+            ):
+                pass
+
+        waiter_thread = threading.Thread(target=wait_for_writer)
+        waiter_thread.start()
+        try:
+            for _ in range(50):
+                if reports:
+                    break
+                time.sleep(0.02)
+            self.assertTrue(reports)
+            self.assertIn("operation=test-holder", reports[0])
+            self.assertIn("target=/held/path", reports[0])
+            self.assertIn(f"pid={os.getpid()}", reports[0])
+        finally:
+            release_holder.set()
+            holder_thread.join(timeout=5)
+            waiter_thread.join(timeout=5)
+            holder.close()
+            waiter.close()
+
+        self.assertFalse(holder_thread.is_alive())
+        self.assertFalse(waiter_thread.is_alive())
+
+    def test_writer_wait_reports_legacy_sqlite_candidates(self) -> None:
+        legacy = DuxService(db_path=self.db_path, max_workers=1)
+        waiter = DuxService(db_path=self.db_path, max_workers=1)
+        legacy.conn.execute("BEGIN IMMEDIATE")
+        reports: list[str] = []
+
+        def wait_for_writer() -> None:
+            with db.writer_transaction(
+                waiter.conn,
+                "test-waiter",
+                "/waiting/path",
+                on_wait=reports.append,
+            ):
+                pass
+
+        waiter_thread = threading.Thread(target=wait_for_writer)
+        waiter_thread.start()
+        try:
+            for _ in range(150):
+                if reports:
+                    break
+                time.sleep(0.02)
+            self.assertTrue(reports)
+            self.assertIn("external/legacy SQLite writer candidates", reports[0])
+            self.assertIn(f"pid={os.getpid()}", reports[0])
+        finally:
+            legacy.conn.rollback()
+            waiter_thread.join(timeout=5)
+            legacy.close()
+            waiter.close()
+
+        self.assertFalse(waiter_thread.is_alive())
 
     def test_index_scan_keeps_main_db_readable(self) -> None:
         sub = self.root / "sub"

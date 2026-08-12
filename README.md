@@ -190,6 +190,10 @@ UI startup does not refresh navigation placeholders or perform any other bookkee
 
 UI 启动时不会刷新导航占位或执行其他维护写入，因此索引合并持有 SQLite 写锁时仍可打开。
 
+Database writers use a sidecar lock registry. When an index merge, delete flush, or other write must wait, the CLI/UI reports the current dux writer's PID, operation, target, command, and lock duration. Writers from older dux versions or external SQLite tools are reported as process candidates because SQLite itself does not expose the exact lock-owning PID.
+
+数据库 writer 使用 sidecar 锁登记。索引合并、删除落盘或其他写操作等待时，CLI/UI 会显示当前 dux writer 的 PID、操作、目标、命令和持锁时长。旧版 dux 或外部 SQLite 工具不会向 SQLite 暴露精确持锁 PID，因此会明确显示为候选进程，而不是伪装成精确持锁者。
+
 Ancestors of an indexed subtree are stored as `indexed=0` placeholders so the UI can navigate upward even when only a subtree has been scanned.
 
 已统计子树的祖先路径会以 `indexed=0` 占位形式保存，因此即使只统计了一个子目录，UI 也可以向上导航。

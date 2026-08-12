@@ -153,6 +153,7 @@ class DuxService:
         path: str,
         progress: Callable[[int, str], None] | None = None,
         progress_interval: int = 10000,
+        lock_status: Callable[[str], None] | None = None,
     ) -> IndexResult:
         root = self.canonical(path)
         staging_path = self._create_staging_db_path()
@@ -174,7 +175,7 @@ class DuxService:
                 staging_conn.execute("PRAGMA wal_checkpoint(FULL)")
             finally:
                 staging_conn.close()
-            self._swap_indexed_subtree(root, staging_path, new_root)
+            self._swap_indexed_subtree(root, staging_path, new_root, lock_status=lock_status)
         finally:
             self._remove_staging_db(staging_path)
 
@@ -191,7 +192,13 @@ class DuxService:
         )
         return IndexResult(root=root_record, scan=scan)
 
-    def _swap_indexed_subtree(self, root: str, staging_path: Path, new_root: sqlite3.Row) -> None:
+    def _swap_indexed_subtree(
+        self,
+        root: str,
+        staging_path: Path,
+        new_root: sqlite3.Row,
+        lock_status: Callable[[str], None] | None = None,
+    ) -> None:
         alias = "staging_index"
         attached = False
         db.attach_database(self.conn, staging_path, alias)
@@ -201,7 +208,12 @@ class DuxService:
             new_files = int(new_root["file_count"])
             new_dirs = int(new_root["dir_count"])
 
-            with self.conn:
+            with db.writer_transaction(
+                self.conn,
+                "index-merge",
+                root,
+                on_wait=lock_status,
+            ):
                 old_root = db.fetch_node(self.conn, root)
                 old_size = int(old_root["size_bytes"]) if old_root else 0
                 old_files = int(old_root["file_count"]) if old_root else 0
@@ -224,7 +236,7 @@ class DuxService:
         return Path(handle.name)
 
     def _remove_staging_db(self, path: Path) -> None:
-        for suffix in ("", "-wal", "-shm"):
+        for suffix in ("", "-wal", "-shm", ".writer.lock"):
             try:
                 path.with_name(path.name + suffix).unlink()
             except FileNotFoundError:
@@ -240,6 +252,7 @@ class DuxService:
         progress_interval: int = 1000,
         unlink_workers: int = 8,
         cancel_event: threading.Event | None = None,
+        status: Callable[[str, str], None] | None = None,
     ) -> str:
         def report(_target: str, count: int, current_path: str) -> None:
             if progress is not None:
@@ -254,6 +267,7 @@ class DuxService:
             workers=1,
             unlink_workers=unlink_workers,
             cancel_event=cancel_event,
+            status=status,
         )
         return destinations[0]
 
@@ -284,6 +298,13 @@ class DuxService:
 
         deleted_queue: queue.Queue[tuple[str, bool] | None] = queue.Queue(maxsize=65536)
         writer_errors: list[BaseException] = []
+        target_summary = ", ".join(target for target, _indexed in targets[:3])
+        if len(targets) > 3:
+            target_summary += f", ... and {len(targets) - 3} more"
+
+        def report_lock_wait(owner: str) -> None:
+            if status is not None:
+                status(target_summary, f"waiting-lock:{owner}")
 
         def write_deleted(path: str, is_dir: bool) -> None:
             while True:
@@ -302,7 +323,12 @@ class DuxService:
             def flush() -> None:
                 nonlocal last_flush
                 if batch:
-                    db.delete_nodes_incremental(self.conn, batch)
+                    db.delete_nodes_incremental(
+                        self.conn,
+                        batch,
+                        target_summary,
+                        on_wait=report_lock_wait,
+                    )
                     batch.clear()
                 last_flush = time.monotonic()
 
@@ -385,7 +411,7 @@ class DuxService:
         indexed_targets = dict(targets)
         for target in completed_targets:
             if indexed_targets[target]:
-                self._delete_subtree_from_index(target)
+                self._delete_subtree_from_index(target, lock_status=report_lock_wait)
             if status is not None:
                 status(target, "index-synced")
 
@@ -414,7 +440,7 @@ class DuxService:
 
     def ensure_navigation_path(self, path: str) -> None:
         root = self.canonical(path)
-        with self.conn:
+        with db.writer_transaction(self.conn, "ensure-navigation", root):
             db.ensure_ancestor_placeholders(self.conn, root)
             db.refresh_placeholder_ancestor_aggregates(self.conn, root)
 
@@ -519,13 +545,17 @@ class DuxService:
         file_delta = new_root.file_count - old_files
         dir_delta = new_root.dir_count - old_dirs
 
-        with self.conn:
+        with db.writer_transaction(self.conn, "replace-subtree", root):
             db.delete_subtree_rows(self.conn, root)
             db.upsert_nodes(self.conn, nodes)
             if size_delta or file_delta or dir_delta:
                 db.apply_delta_to_ancestors(self.conn, root, size_delta, file_delta, dir_delta)
 
-    def _delete_subtree_from_index(self, root: str) -> None:
+    def _delete_subtree_from_index(
+        self,
+        root: str,
+        lock_status: Callable[[str], None] | None = None,
+    ) -> None:
         row = db.fetch_node(self.conn, root)
         if row is None:
             return
@@ -535,7 +565,12 @@ class DuxService:
         if bool(row["is_dir"]):
             dir_delta -= 1
 
-        with self.conn:
+        with db.writer_transaction(
+            self.conn,
+            "delete-subtree",
+            root,
+            on_wait=lock_status,
+        ):
             db.delete_subtree_rows(self.conn, root)
             db.apply_delta_to_ancestors(self.conn, root, size_delta, file_delta, dir_delta)
 

@@ -483,7 +483,12 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
             self.run_worker(self._refresh_current_worker, thread=True)
 
         def _refresh_current_worker(self) -> None:
-            self.service.index_path(self.current_path)
+            self.service.index_path(
+                self.current_path,
+                lock_status=lambda owner: self.call_from_thread(
+                    self._set_status, f"Refresh waiting for database writer: {owner}"
+                ),
+            )
             self.call_from_thread(self._reload_table)
 
         def action_filter_paths(self) -> None:
@@ -756,7 +761,14 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
                     )
 
                 def status(target: str, phase: str) -> None:
-                    if phase == "flushing-index":
+                    if phase.startswith("waiting-lock:"):
+                        owner = phase.removeprefix("waiting-lock:")
+                        self.call_from_thread(
+                            self._show_delete_job_status,
+                            job_id,
+                            f"Waiting for database writer: {owner}",
+                        )
+                    elif phase == "flushing-index":
                         self.call_from_thread(
                             self._show_delete_job_status, job_id, f"Flushing index updates: {target}"
                         )

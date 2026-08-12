@@ -1,14 +1,24 @@
 from __future__ import annotations
 
+import fcntl
+import json
+import os
 import sqlite3
+import sys
+import threading
 import time
 from collections import defaultdict
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Callable, Iterator
 
 from .model import NodeRecord
 
 
 DEFAULT_DB_PATH = Path("~/.cache/dux/dux.db").expanduser()
+LOCK_REPORT_INTERVAL = 1.0
+_CONNECTION_PATHS: dict[int, Path] = {}
+_CONNECTION_PATHS_LOCK = threading.Lock()
 
 
 SCHEMA = """
@@ -37,26 +47,167 @@ CREATE INDEX IF NOT EXISTS idx_nodes_depth ON nodes(depth);
 def connect(db_path: str | Path | None = None) -> sqlite3.Connection:
     path = Path(db_path or DEFAULT_DB_PATH).expanduser()
     path.parent.mkdir(parents=True, exist_ok=True)
+    initialize = not path.exists() or path.stat().st_size == 0
     conn = sqlite3.connect(path, check_same_thread=False, timeout=60.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout=60000")
-    conn.executescript(SCHEMA)
-    _migrate(conn)
+    conn.execute("PRAGMA synchronous=NORMAL")
+    with _CONNECTION_PATHS_LOCK:
+        _CONNECTION_PATHS[id(conn)] = path.resolve()
+    if initialize:
+        with writer_lock(conn, "initialize-schema", str(path)):
+            conn.executescript(SCHEMA)
+    else:
+        _migrate(conn)
     return conn
+
+
+def connection_path(conn: sqlite3.Connection) -> Path:
+    with _CONNECTION_PATHS_LOCK:
+        return _CONNECTION_PATHS[id(conn)]
+
+
+def _writer_description(metadata: dict[str, object] | None) -> str:
+    if not metadata:
+        return "unknown writer"
+    started_at = float(metadata.get("started_at", time.time()))
+    held = max(0.0, time.time() - started_at)
+    return (
+        f"pid={metadata.get('pid', '?')} operation={metadata.get('operation', '?')} "
+        f"target={metadata.get('target', '?')} held={held:.1f}s "
+        f"command={metadata.get('command', '?')}"
+    )
+
+
+def _read_lock_metadata(lock_file) -> dict[str, object] | None:
+    try:
+        lock_file.seek(0)
+        content = lock_file.read()
+        return json.loads(content) if content else None
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def _open_process_candidates(db_path: Path) -> str:
+    candidates: list[str] = []
+    db_paths = {str(db_path), f"{db_path}-wal", f"{db_path}-shm"}
+    proc_root = Path("/proc")
+    for process_dir in proc_root.iterdir():
+        if not process_dir.name.isdigit():
+            continue
+        try:
+            open_paths: set[str] = set()
+            for fd in (process_dir / "fd").iterdir():
+                try:
+                    open_paths.add(os.readlink(fd))
+                except (FileNotFoundError, PermissionError, ProcessLookupError, OSError):
+                    continue
+            if not open_paths.intersection(db_paths):
+                continue
+            command = (process_dir / "cmdline").read_bytes().replace(b"\0", b" ").decode(
+                errors="replace"
+            ).strip()
+            candidates.append(f"pid={process_dir.name} command={command or '?'}")
+        except (FileNotFoundError, PermissionError, ProcessLookupError, OSError):
+            continue
+    return "; ".join(candidates) if candidates else "no visible process candidates"
+
+
+@contextmanager
+def writer_lock(
+    conn: sqlite3.Connection,
+    operation: str,
+    target: str,
+    on_wait: Callable[[str], None] | None = None,
+) -> Iterator[object]:
+    db_path = connection_path(conn)
+    lock_path = Path(f"{db_path}.writer.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+", encoding="utf-8") as lock_file:
+        last_report = 0.0
+        while True:
+            try:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                now = time.monotonic()
+                if on_wait is not None and now - last_report >= LOCK_REPORT_INTERVAL:
+                    on_wait(_writer_description(_read_lock_metadata(lock_file)))
+                    last_report = now
+                time.sleep(0.1)
+
+        metadata = {
+            "pid": os.getpid(),
+            "thread": threading.current_thread().name,
+            "operation": operation,
+            "target": target,
+            "started_at": time.time(),
+            "command": " ".join(sys.argv),
+        }
+        lock_file.seek(0)
+        lock_file.truncate()
+        json.dump(metadata, lock_file, ensure_ascii=True)
+        lock_file.flush()
+        try:
+            yield lock_file
+        finally:
+            lock_file.seek(0)
+            lock_file.truncate()
+            lock_file.flush()
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+@contextmanager
+def writer_transaction(
+    conn: sqlite3.Connection,
+    operation: str,
+    target: str,
+    on_wait: Callable[[str], None] | None = None,
+) -> Iterator[None]:
+    db_path = connection_path(conn)
+    with writer_lock(conn, operation, target, on_wait=on_wait):
+        conn.execute("PRAGMA busy_timeout=1000")
+        last_report = 0.0
+        while True:
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                break
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc).lower() and "busy" not in str(exc).lower():
+                    raise
+                now = time.monotonic()
+                if on_wait is not None and now - last_report >= LOCK_REPORT_INTERVAL:
+                    on_wait(
+                        "external/legacy SQLite writer candidates: "
+                        + _open_process_candidates(db_path)
+                    )
+                    last_report = now
+        try:
+            yield
+        except BaseException:
+            conn.rollback()
+            raise
+        else:
+            conn.commit()
+        finally:
+            conn.execute("PRAGMA busy_timeout=60000")
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
     columns = {row["name"] for row in conn.execute("PRAGMA table_info(nodes)")}
-    if "indexed" not in columns:
-        conn.execute("ALTER TABLE nodes ADD COLUMN indexed INTEGER NOT NULL DEFAULT 1")
-    if "depth" not in columns:
-        conn.execute("ALTER TABLE nodes ADD COLUMN depth INTEGER NOT NULL DEFAULT 0")
-        rows = conn.execute("SELECT path FROM nodes").fetchall()
-        conn.executemany(
-            "UPDATE nodes SET depth = ? WHERE path = ?",
-            [(len(Path(row["path"]).parts), row["path"]) for row in rows],
-        )
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_nodes_depth ON nodes(depth)")
+    if "indexed" in columns and "depth" in columns:
+        return
+    with writer_transaction(conn, "migrate-schema", str(connection_path(conn))):
+        if "indexed" not in columns:
+            conn.execute("ALTER TABLE nodes ADD COLUMN indexed INTEGER NOT NULL DEFAULT 1")
+        if "depth" not in columns:
+            conn.execute("ALTER TABLE nodes ADD COLUMN depth INTEGER NOT NULL DEFAULT 0")
+            rows = conn.execute("SELECT path FROM nodes").fetchall()
+            conn.executemany(
+                "UPDATE nodes SET depth = ? WHERE path = ?",
+                [(len(Path(row["path"]).parts), row["path"]) for row in rows],
+            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_nodes_depth ON nodes(depth)")
 
 
 def upsert_node_batch(conn: sqlite3.Connection, nodes: list[NodeRecord]) -> None:
@@ -172,13 +323,18 @@ def delete_subtree_rows(conn: sqlite3.Connection, root_path: str) -> None:
     )
 
 
-def delete_nodes_incremental(conn: sqlite3.Connection, deleted: list[tuple[str, bool]]) -> int:
+def delete_nodes_incremental(
+    conn: sqlite3.Connection,
+    deleted: list[tuple[str, bool]],
+    target: str,
+    on_wait: Callable[[str], None] | None = None,
+) -> int:
     if not deleted:
         return 0
 
     paths = list(dict.fromkeys(path for path, _is_dir in deleted))
     rows: list[sqlite3.Row] = []
-    with conn:
+    with writer_transaction(conn, "delete-index-flush", target, on_wait=on_wait):
         for offset in range(0, len(paths), 500):
             chunk = paths[offset : offset + 500]
             placeholders = ",".join("?" for _ in chunk)
