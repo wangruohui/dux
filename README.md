@@ -186,6 +186,10 @@ During indexing, `dux` scans into a temporary staging SQLite database first, the
 
 索引过程中，`dux` 会先扫描到临时 staging SQLite 数据库，再用一个短事务把完成的子树替换进主数据库。因此长时间扫描时 `dux ui` 仍可使用；最终 swap 完成前，UI 读取的是上一个已提交快照。
 
+UI startup does not refresh navigation placeholders or perform any other bookkeeping write, so it can open while an index merge holds the SQLite writer lock.
+
+UI 启动时不会刷新导航占位或执行其他维护写入，因此索引合并持有 SQLite 写锁时仍可打开。
+
 Ancestors of an indexed subtree are stored as `indexed=0` placeholders so the UI can navigate upward even when only a subtree has been scanned.
 
 已统计子树的祖先路径会以 `indexed=0` 占位形式保存，因此即使只统计了一个子目录，UI 也可以向上导航。

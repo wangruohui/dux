@@ -297,7 +297,6 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
             super().__init__()
             self.service = DuxService(db_path=db_path, max_workers=workers)
             self.current_path = self.service.canonical(path)
-            self.service.ensure_navigation_path(self.current_path)
             self.sort_by = "size"
             self.reverse = True
             self.rows_by_key: dict[str, bool] = {}
