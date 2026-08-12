@@ -41,7 +41,9 @@ def scan_subtree_to_db(
     root_path_obj = Path(root)
     root_name = root_path_obj.name or root
     root_parent = str(root_path_obj.parent) if root != "/" else None
-    write_queue: queue.Queue[NodeRecord | None] = queue.Queue(maxsize=max_workers * 4)
+    write_queue: queue.Queue[list[NodeRecord] | None] = queue.Queue(
+        maxsize=max(4, min(max_workers, 32))
+    )
     work: queue.Queue[tuple[str, int] | None] = queue.Queue()
     root_depth = len(root_path_obj.parts)
     work.put((root, root_depth))
@@ -49,8 +51,9 @@ def scan_subtree_to_db(
     scanned_files = 0
     scanned_dirs = 1
 
-    def write_record(record: NodeRecord) -> None:
-        write_queue.put(record)
+    def write_records(records: list[NodeRecord]) -> None:
+        if records:
+            write_queue.put(records)
 
     def writer() -> None:
         batch: list[NodeRecord] = []
@@ -61,39 +64,52 @@ def scan_subtree_to_db(
                     if batch:
                         db.upsert_node_batch(conn, batch)
                     return
-                batch.append(item)
-                if len(batch) >= batch_size:
-                    db.upsert_node_batch(conn, batch)
-                    batch.clear()
+                batch.extend(item)
+                while len(batch) >= batch_size:
+                    db.upsert_node_batch(conn, batch[:batch_size])
+                    del batch[:batch_size]
             finally:
                 write_queue.task_done()
 
     writer_thread = threading.Thread(target=writer, name="dux-sqlite-writer")
     writer_thread.start()
-    write_record(
-        NodeRecord(
-            path=root,
-            parent_path=root_parent,
-            name=root_name,
-            is_dir=True,
-            indexed=True,
-            depth=root_depth,
-            size_bytes=0,
-            file_count=0,
-            dir_count=0,
-        )
+    write_records(
+        [
+            NodeRecord(
+                path=root,
+                parent_path=root_parent,
+                name=root_name,
+                is_dir=True,
+                indexed=True,
+                depth=root_depth,
+                size_bytes=0,
+                file_count=0,
+                dir_count=0,
+            )
+        ]
     )
 
-    def maybe_report_file(path: str) -> None:
-        nonlocal scanned_files
+    def record_progress(file_count: int, dir_count: int, path: str) -> None:
+        nonlocal scanned_files, scanned_dirs
+        reports: list[int] = []
         with progress_lock:
-            scanned_files += 1
-            current = scanned_files
-        if progress is not None and progress_interval > 0 and current % progress_interval == 0:
-            progress(current, path)
+            previous = scanned_files
+            scanned_files += file_count
+            scanned_dirs += dir_count
+            if progress is not None and progress_interval > 0:
+                report_at = ((previous // progress_interval) + 1) * progress_interval
+                while report_at <= scanned_files:
+                    reports.append(report_at)
+                    report_at += progress_interval
+        if progress is not None:
+            for count in reports:
+                progress(count, path)
 
     def handle_dir(dir_path: str, dir_depth: int) -> None:
-        nonlocal scanned_dirs
+        records: list[NodeRecord] = []
+        found_files = 0
+        found_dirs = 0
+        current_path = dir_path
         try:
             with os.scandir(dir_path) as it:
                 for entry in it:
@@ -104,7 +120,7 @@ def scan_subtree_to_db(
                         continue
 
                     is_dir = stat.S_ISDIR(st.st_mode)
-                    write_record(
+                    records.append(
                         NodeRecord(
                             path=child_path,
                             parent_path=dir_path,
@@ -117,15 +133,20 @@ def scan_subtree_to_db(
                             dir_count=0,
                         )
                     )
+                    if len(records) >= batch_size:
+                        write_records(records)
+                        records = []
 
                     if is_dir:
-                        with progress_lock:
-                            scanned_dirs += 1
+                        found_dirs += 1
                         work.put((child_path, dir_depth + 1))
                     else:
-                        maybe_report_file(child_path)
+                        found_files += 1
+                        current_path = child_path
         except OSError:
-            return
+            pass
+        write_records(records)
+        record_progress(found_files, found_dirs, current_path)
 
     def worker() -> None:
         while True:

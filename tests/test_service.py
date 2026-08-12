@@ -69,6 +69,19 @@ class ServiceTests(unittest.TestCase):
         finally:
             reader.close()
 
+    def test_index_reports_each_progress_interval_after_batching(self) -> None:
+        for index in range(5):
+            (self.root / f"file-{index}.bin").write_bytes(b"x")
+        reports: list[int] = []
+
+        self.service.index_path(
+            str(self.root),
+            progress=lambda count, _path: reports.append(count),
+            progress_interval=2,
+        )
+
+        self.assertEqual(reports, [2, 4])
+
     def test_delete_propagates_to_parent(self) -> None:
         sub = self.root / "sub"
         sub.mkdir()
