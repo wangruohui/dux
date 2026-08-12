@@ -164,9 +164,9 @@ During deletion, the status line reports the active phase. File removal shows a 
 
 删除过程中，状态栏会显示当前阶段。文件删除阶段会显示进度条、已处理条目数、吞吐、ETA 和当前路径。成功删除的条目会持续投递给 SQLite writer 批量删节点，并把大小、文件数和目录数变化同步到所有已索引父级；取消时不会重新扫描目标。
 
-Filter matching is case-sensitive and applies a shell glob to each entry's basename only; `/` is not part of the match. For example, `a*` matches names beginning with `a`. When a directory matches, it is returned and its descendants are not scanned, following `find ... -prune` semantics. If the relative path contains the exclude keyword, that entry is skipped; excluded directories are not entered.
+Filter matching is case-sensitive and applies a shell glob to each entry's basename only; `/` is not part of the match. For example, `a*` matches names beginning with `a`. Filter combines read-only SQLite candidates with a live filesystem scan: existing indexed matches and live-only matches are merged, while stale database matches missing from the filesystem are counted but excluded from the selectable deletion list. When a directory matches, it is returned and its descendants are not scanned, following `find ... -prune` semantics. If the relative path contains the exclude keyword, that entry is skipped; excluded directories are not entered.
 
-筛选只对每个条目的 basename 做大小写敏感的 shell 通配符匹配，不涉及 `/`；例如 `a*` 匹配所有以 `a` 开头的名称。目录命中后返回该目录且不再扫描其子目录，语义与 `find ... -prune` 一致。相对路径包含 exclude 关键字的条目会被跳过，其中目录不会继续进入。
+筛选只对每个条目的 basename 做大小写敏感的 shell 通配符匹配，不涉及 `/`；例如 `a*` 匹配所有以 `a` 开头的名称。筛选会合并只读 SQLite 候选和实时文件系统扫描：保留现场存在的 indexed 匹配与 live-only 匹配；数据库中现场已消失的 stale 匹配只计数提示，不进入可选择的删除列表。目录命中后返回该目录且不再扫描其子目录，语义与 `find ... -prune` 一致。相对路径包含 exclude 关键字的条目会被跳过，其中目录不会继续进入。
 
 In the filtered-result delete confirmation, `n` or `Esc` returns to the result table with the previous selections preserved; only `y` closes the result table and starts deletion.
 

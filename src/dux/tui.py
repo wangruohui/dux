@@ -536,6 +536,9 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
                     result.paths,
                     result.scanned_dirs,
                     result.elapsed_seconds,
+                    result.indexed_matches,
+                    result.live_only_matches,
+                    result.stale_index_matches,
                     None,
                 )
             except Exception as exc:
@@ -547,6 +550,9 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
                     [],
                     0,
                     0.0,
+                    0,
+                    0,
+                    0,
                     exc,
                 )
 
@@ -558,6 +564,9 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
             paths: list[str],
             scanned_dirs: int,
             elapsed: float,
+            indexed_matches: int,
+            live_only_matches: int,
+            stale_index_matches: int,
             error: Exception | None,
         ) -> None:
             self.filter_active = False
@@ -566,8 +575,15 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
                 self.notify(f"Filter failed: {error}", severity="error")
                 return
             self._set_status(
-                f"Filter complete: {len(paths)} match(es), {scanned_dirs} dirs in {elapsed:.1f}s"
+                f"Filter complete: {len(paths)} match(es), indexed-live={indexed_matches} "
+                f"live-only={live_only_matches} stale-db={stale_index_matches}, "
+                f"{scanned_dirs} dirs in {elapsed:.1f}s"
             )
+            if stale_index_matches:
+                self.notify(
+                    f"Skipped {stale_index_matches} stale database match(es) missing from the filesystem.",
+                    severity="warning",
+                )
             if not paths:
                 self.notify(
                     f"No paths matching {keyword!r} under {root}; exclude={exclude!r}",

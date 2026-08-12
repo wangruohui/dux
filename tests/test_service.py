@@ -426,6 +426,23 @@ class ServiceTests(unittest.TestCase):
             [str(self.root / "alpha"), str(self.root / "beta" / "apricot")],
         )
 
+    def test_filter_paths_merges_index_and_live_filesystem(self) -> None:
+        indexed = self.root / "indexed-target"
+        stale = self.root / "stale-target"
+        indexed.write_bytes(b"indexed")
+        stale.write_bytes(b"stale")
+        self.service.index_path(str(self.root))
+        stale.unlink()
+        live_only = self.root / "live-target"
+        live_only.write_bytes(b"live")
+
+        result = self.service.filter_paths(str(self.root), "*target")
+
+        self.assertEqual(result.paths, [str(indexed), str(live_only)])
+        self.assertEqual(result.indexed_matches, 1)
+        self.assertEqual(result.live_only_matches, 1)
+        self.assertEqual(result.stale_index_matches, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

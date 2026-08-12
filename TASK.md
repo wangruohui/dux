@@ -41,3 +41,7 @@
 - DONE：统一登记主库 writer 的 PID、命令、操作、目标和持锁时间；删除等待时在状态栏显示持锁者，外部或旧版 writer 列出候选进程。
 - DONE：已有数据库连接不再重复执行建表、建索引和 WAL 初始化，只在确实缺少字段时进入带诊断的迁移写事务。
 - DONE：精确 owner、legacy candidate、TUI 等待状态和释放后索引一致性测试通过；真实默认库候选识别为 PID 345634 的 NEO_Unify index。
+
+## Filter 混合扫描
+
+- DONE：filter 合并只读 SQLite 候选与实时文件系统递归结果；只返回现场存在的并集，并显示 indexed-live、live-only 和 stale-db 数量；mismatch 单测与完整 TUI 流程通过。

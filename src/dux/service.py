@@ -34,6 +34,9 @@ class FilterResult:
     paths: list[str]
     scanned_dirs: int
     elapsed_seconds: float
+    indexed_matches: int
+    live_only_matches: int
+    stale_index_matches: int
 
 
 class DeleteCancelled(RuntimeError):
@@ -76,9 +79,41 @@ class DuxService:
             raise NotADirectoryError(root)
 
         started_at = time.monotonic()
+        filter_conn = db.connect(self.db_path)
+        try:
+            indexed_rows = db.fetch_filter_candidates(filter_conn, root, keyword)
+        finally:
+            filter_conn.close()
+        indexed_candidates: list[tuple[str, bool]] = []
+        for row in indexed_rows:
+            candidate = str(row["path"])
+            if exclude and exclude in os.path.relpath(candidate, root):
+                continue
+            if fnmatch.fnmatchcase(str(row["name"]), keyword):
+                indexed_candidates.append((candidate, bool(row["is_dir"])))
+
+        indexed_live: dict[str, bool] = {}
+        stale_index_matches = 0
+        matched_index_dirs: list[str] = []
+        for candidate, is_dir in sorted(
+            indexed_candidates,
+            key=lambda item: (len(Path(item[0]).parts), item[0]),
+        ):
+            if any(
+                candidate.startswith(matched_dir.rstrip("/") + "/")
+                for matched_dir in matched_index_dirs
+            ):
+                continue
+            if is_dir:
+                matched_index_dirs.append(candidate)
+            if not os.path.lexists(candidate):
+                stale_index_matches += 1
+                continue
+            indexed_live[candidate] = is_dir
+
         work: queue.Queue[str | None] = queue.Queue()
         work.put(root)
-        matches: list[str] = []
+        matches: dict[str, bool] = {}
         matches_lock = threading.Lock()
         progress_lock = threading.Lock()
         stop_event = threading.Event()
@@ -103,7 +138,7 @@ class DuxService:
                     is_dir = entry.is_dir(follow_symlinks=False)
                     if fnmatch.fnmatchcase(entry.name, keyword):
                         with matches_lock:
-                            matches.append(entry.path)
+                            matches[entry.path] = is_dir
                         continue
                     if is_dir:
                         work.put(entry.path)
@@ -112,7 +147,7 @@ class DuxService:
                 scanned_dirs += 1
                 current_dirs = scanned_dirs
             with matches_lock:
-                current_matches = len(matches)
+                current_matches = len(set(indexed_live).union(matches))
             if progress is not None and progress_interval > 0 and current_dirs % progress_interval == 0:
                 progress(current_dirs, current_matches, directory)
 
@@ -126,6 +161,8 @@ class DuxService:
                         continue
                     try:
                         handle_dir(directory)
+                    except FileNotFoundError:
+                        pass
                     except BaseException as exc:
                         record_error(exc)
                 finally:
@@ -142,10 +179,26 @@ class DuxService:
 
         if errors:
             raise errors[0]
+        combined = set(indexed_live).union(matches)
+        final_paths: list[str] = []
+        matched_dirs: list[str] = []
+        for candidate in sorted(combined, key=lambda item: (len(Path(item).parts), item)):
+            if any(
+                candidate.startswith(matched_dir.rstrip("/") + "/")
+                for matched_dir in matched_dirs
+            ):
+                continue
+            final_paths.append(candidate)
+            if matches.get(candidate, indexed_live.get(candidate, False)):
+                matched_dirs.append(candidate)
+        final_path_set = set(final_paths)
         return FilterResult(
-            paths=sorted(matches),
+            paths=sorted(final_paths),
             scanned_dirs=scanned_dirs,
             elapsed_seconds=time.monotonic() - started_at,
+            indexed_matches=len(final_path_set.intersection(indexed_live)),
+            live_only_matches=len(final_path_set.intersection(matches).difference(indexed_live)),
+            stale_index_matches=stale_index_matches,
         )
 
     def index_path(

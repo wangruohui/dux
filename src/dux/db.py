@@ -314,6 +314,32 @@ def fetch_children(conn: sqlite3.Connection, path: str) -> list[sqlite3.Row]:
     return list(conn.execute("SELECT * FROM nodes WHERE parent_path = ?", (path,)))
 
 
+def fetch_filter_candidates(
+    conn: sqlite3.Connection,
+    root_path: str,
+    name_pattern: str,
+) -> list[sqlite3.Row]:
+    if root_path == "/":
+        return list(
+            conn.execute(
+                "SELECT path, name, is_dir FROM nodes WHERE path != '/' AND name GLOB ?",
+                (name_pattern,),
+            )
+        )
+    child_lower = f"{root_path}/"
+    child_upper = f"{root_path}0"
+    return list(
+        conn.execute(
+            """
+            SELECT path, name, is_dir
+            FROM nodes
+            WHERE path >= ? AND path < ? AND name GLOB ?
+            """,
+            (child_lower, child_upper, name_pattern),
+        )
+    )
+
+
 def delete_subtree_rows(conn: sqlite3.Connection, root_path: str) -> None:
     child_lower = f"{root_path}/"
     child_upper = f"{root_path}0"
