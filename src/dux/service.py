@@ -84,8 +84,7 @@ class DuxService:
                 for entry in entries:
                     if stop_event.is_set():
                         return
-                    relative_path = os.path.relpath(entry.path, root)
-                    if exclude and exclude in relative_path:
+                    if exclude and exclude in os.path.relpath(entry.path, root):
                         continue
                     is_dir = entry.is_dir(follow_symlinks=False)
                     if entry.name == keyword:
@@ -98,6 +97,7 @@ class DuxService:
             with progress_lock:
                 scanned_dirs += 1
                 current_dirs = scanned_dirs
+            with matches_lock:
                 current_matches = len(matches)
             if progress is not None and progress_interval > 0 and current_dirs % progress_interval == 0:
                 progress(current_dirs, current_matches, directory)

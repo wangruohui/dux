@@ -137,6 +137,8 @@ dux --workers 16 index /data/project
 - `Delete` / `Shift+Delete`：如果有标记行，则删除所有标记行；否则删除当前光标行。按 `y` 确认，按 `n` 或 `Esc` 取消。
 - `r`: refresh the current subtree.
 - `r`：刷新当前子树。
+- `f`: recursively find exact file/directory names below the current directory, with optional exclude-path pruning; select results with `Space` and continue with `Enter`.
+- `f`：在当前目录下递归查找名称精确匹配的文件或目录，可填写 exclude 关键字剪枝；结果中用 `Space` 选择、`Enter` 继续删除确认。
 - `s`: sort by size.
 - `s`：按大小排序。
 - `c`: sort by recursive file count.
@@ -156,9 +158,13 @@ All sort keys use descending order, and unindexed entries are always listed afte
 
 所有排序键都按从大到小排列，未统计项始终排在已统计项之后。
 
-During deletion, the status line reports the active phase. File removal shows a progress bar, processed entry count, throughput, and current path; after files are removed, `Updating index...` means SQLite is removing the subtree rows and propagating parent totals.
+During deletion, the status line reports the active phase. File removal shows a progress bar, processed entry count, throughput, ETA, and current path; after files are removed, `Updating index...` means SQLite is removing the subtree rows and propagating parent totals.
 
-删除过程中，状态栏会显示当前阶段。文件删除阶段会显示进度条、已处理条目数、吞吐和当前路径；文件删完后出现 `Updating index...` 表示 SQLite 正在删除子树索引并同步父级聚合值。
+删除过程中，状态栏会显示当前阶段。文件删除阶段会显示进度条、已处理条目数、吞吐、ETA 和当前路径；文件删完后出现 `Updating index...` 表示 SQLite 正在删除子树索引并同步父级聚合值。
+
+Filter matching is case-sensitive and compares the complete file or directory name. When a directory matches, it is returned and its descendants are not scanned, following `find ... -prune` semantics. If the relative path contains the exclude keyword, that entry is skipped; excluded directories are not entered.
+
+筛选按大小写敏感的完整文件名或目录名匹配。目录命中后返回该目录且不再扫描其子目录，语义与 `find ... -prune` 一致。相对路径包含 exclude 关键字的条目会被跳过，其中目录不会继续进入。
 
 ## Indexing Semantics / 索引语义
 

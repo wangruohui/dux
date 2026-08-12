@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 import time
 from pathlib import Path
 
@@ -31,13 +32,24 @@ def _progress_bar(value: int, total: int | None, width: int = 20) -> str:
     return "[" + ("#" * filled).ljust(width) + "]"
 
 
+def _eta(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    hours, remainder = divmod(seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours}h{minutes:02d}m"
+    if minutes:
+        return f"{minutes}m{seconds:02d}s"
+    return f"{seconds}s"
+
+
 def run_ui(db_path: str | None, path: str, workers: int) -> None:
     try:
         from textual.app import App, ComposeResult
         from textual.binding import Binding
         from textual.containers import Container
         from textual.screen import ModalScreen
-        from textual.widgets import DataTable, Footer, Header, Label, Static
+        from textual.widgets import DataTable, Footer, Header, Input, Label, Static
         from rich.text import Text
     except ImportError as exc:
         raise SystemExit("textual is required for `dux ui`; install project dependencies first") from exc
@@ -87,6 +99,120 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
         def key_escape(self) -> None:
             self.dismiss(False)
 
+    class FilterQueryScreen(ModalScreen[tuple[str, str] | None]):
+        def compose(self) -> ComposeResult:
+            yield Container(
+                Static("Recursive filter from the current directory", classes="dialog-title"),
+                Label("Exact name to find"),
+                Input(placeholder="required exact file or directory name", id="filter-keyword"),
+                Label("Exclude paths containing"),
+                Input(placeholder="optional; matching directories are pruned", id="filter-exclude"),
+                Label("Enter: next/start    Esc: cancel"),
+                id="filter-dialog",
+            )
+
+        def on_mount(self) -> None:
+            self.query_one("#filter-keyword", Input).focus()
+
+        def on_input_submitted(self, event: Input.Submitted) -> None:
+            if event.input.id == "filter-keyword":
+                self.query_one("#filter-exclude", Input).focus()
+                return
+            keyword = self.query_one("#filter-keyword", Input).value
+            if not keyword:
+                self.app.notify("Filter keyword must not be empty.", severity="warning")
+                self.query_one("#filter-keyword", Input).focus()
+                return
+            exclude = self.query_one("#filter-exclude", Input).value
+            self.dismiss((keyword, exclude))
+
+        def key_escape(self) -> None:
+            self.dismiss(None)
+
+    class FilterResultsTable(DataTable):
+        def on_key(self, event) -> None:
+            if event.key == "space":
+                event.stop()
+                self.screen.action_toggle_result()
+            elif event.key == "a":
+                event.stop()
+                self.screen.action_toggle_all_results()
+            elif event.key == "enter":
+                event.stop()
+                self.screen.action_accept_results()
+            elif event.key in {"escape", "q"}:
+                event.stop()
+                self.screen.dismiss(None)
+
+    class FilterResultsScreen(ModalScreen[list[str] | None]):
+        def __init__(self, root: str, paths: list[str]) -> None:
+            super().__init__()
+            self.root = root
+            self.paths = paths
+            self.selected_paths: set[str] = set()
+
+        def compose(self) -> ComposeResult:
+            yield Container(
+                Static(f"Filter results under {self.root}", classes="dialog-title"),
+                Static("Space: select    a: all/none    Enter: delete selected    Esc/q: cancel"),
+                Static(f"0/{len(self.paths)} selected", id="filter-result-status"),
+                FilterResultsTable(id="filter-results"),
+                id="results-dialog",
+            )
+
+        def on_mount(self) -> None:
+            table = self.query_one("#filter-results", DataTable)
+            table.cursor_type = "row"
+            table.add_column("Selected", key="selected")
+            table.add_column("Path", key="path")
+            for path in self.paths:
+                table.add_row("[ ]", path, key=path)
+            table.focus()
+
+        def _current_result(self) -> str | None:
+            table = self.query_one("#filter-results", DataTable)
+            if table.cursor_row < 0 or table.row_count == 0:
+                return None
+            cell_key = table.coordinate_to_cell_key(table.cursor_coordinate)
+            return str(cell_key.row_key.value)
+
+        def _update_result(self, path: str) -> None:
+            marker: str | Text = "[ ]"
+            if path in self.selected_paths:
+                marker = Text("[x]", style="bold black on yellow")
+            self.query_one("#filter-results", DataTable).update_cell(path, "selected", marker)
+
+        def _update_status(self) -> None:
+            self.query_one("#filter-result-status", Static).update(
+                f"{len(self.selected_paths)}/{len(self.paths)} selected"
+            )
+
+        def action_toggle_result(self) -> None:
+            path = self._current_result()
+            if path is None:
+                return
+            if path in self.selected_paths:
+                self.selected_paths.remove(path)
+            else:
+                self.selected_paths.add(path)
+            self._update_result(path)
+            self._update_status()
+
+        def action_toggle_all_results(self) -> None:
+            if len(self.selected_paths) == len(self.paths):
+                self.selected_paths.clear()
+            else:
+                self.selected_paths = set(self.paths)
+            for path in self.paths:
+                self._update_result(path)
+            self._update_status()
+
+        def action_accept_results(self) -> None:
+            if not self.selected_paths:
+                self.app.notify("Select at least one filter result.", severity="warning")
+                return
+            self.dismiss(sorted(self.selected_paths))
+
     class DuxApp(App[None]):
         CSS = """
         Screen {
@@ -100,6 +226,32 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
             border: round #7dd3fc;
             padding: 1 2;
             align: center middle;
+        }
+        #filter-dialog {
+            width: 76%;
+            height: auto;
+            background: #16212d;
+            border: round #7dd3fc;
+            padding: 1 2;
+            align: center middle;
+        }
+        #results-dialog {
+            width: 94%;
+            height: 86%;
+            background: #16212d;
+            border: round #7dd3fc;
+            padding: 1 2;
+        }
+        .dialog-title {
+            color: #7dd3fc;
+            text-style: bold;
+            margin-bottom: 1;
+        }
+        #filter-result-status {
+            color: #facc15;
+        }
+        #filter-results {
+            height: 1fr;
         }
         DataTable {
             height: 1fr;
@@ -117,6 +269,7 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
             Binding("enter", "open_selected", "Open"),
             Binding("backspace", "go_parent", "Up"),
             Binding("r", "refresh_current", "Refresh"),
+            Binding("f", "filter_paths", "Filter"),
             Binding("space", "toggle_select", "Select"),
             Binding("delete", "delete_requested", "Delete"),
             Binding("shift+delete", "delete_requested", "Delete"),
@@ -136,6 +289,7 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
             self.rows_by_key: dict[str, bool] = {}
             self.marked_paths: set[str] = set()
             self.delete_active = False
+            self.filter_active = False
 
         def compose(self) -> ComposeResult:
             yield Header()
@@ -146,6 +300,9 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
         def action_request_quit(self) -> None:
             if self.delete_active:
                 self.notify("Delete is still running; wait for it to finish before quitting.", severity="warning")
+                return
+            if self.filter_active:
+                self.notify("Filter is still running; wait for it to finish before quitting.", severity="warning")
                 return
             self.service.close()
             self.exit()
@@ -304,6 +461,112 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
             self.service.index_path(self.current_path)
             self.call_from_thread(self._reload_table)
 
+        def action_filter_paths(self) -> None:
+            if self.filter_active:
+                self.notify("Filter is already running.", severity="warning")
+                return
+            if self.delete_active:
+                self.notify("Delete is still running.", severity="warning")
+                return
+
+            def after_query(query: tuple[str, str] | None) -> None:
+                if query is None:
+                    return
+                keyword, exclude = query
+                root = self.current_path
+                self.filter_active = True
+                self._set_status(f"Filtering {root} exact={keyword!r} exclude={exclude!r}...")
+                self.run_worker(
+                    lambda: self._filter_worker(root, keyword, exclude),
+                    thread=True,
+                )
+
+            self.push_screen(FilterQueryScreen(), after_query)
+
+        def _filter_worker(self, root: str, keyword: str, exclude: str) -> None:
+            try:
+                started_at = time.monotonic()
+
+                def progress(scanned_dirs: int, matches: int, current: str) -> None:
+                    elapsed = max(time.monotonic() - started_at, 0.001)
+                    self.call_from_thread(
+                        self._set_status,
+                        f"Filtering dirs={scanned_dirs} matches={matches} "
+                        f"dirs/s={scanned_dirs / elapsed:.1f} current={current}",
+                    )
+
+                result = self.service.filter_paths(
+                    root,
+                    keyword,
+                    exclude=exclude,
+                    progress=progress,
+                )
+                self.call_from_thread(
+                    self._finish_filter,
+                    root,
+                    keyword,
+                    exclude,
+                    result.paths,
+                    result.scanned_dirs,
+                    result.elapsed_seconds,
+                    None,
+                )
+            except Exception as exc:
+                self.call_from_thread(
+                    self._finish_filter,
+                    root,
+                    keyword,
+                    exclude,
+                    [],
+                    0,
+                    0.0,
+                    exc,
+                )
+
+        def _finish_filter(
+            self,
+            root: str,
+            keyword: str,
+            exclude: str,
+            paths: list[str],
+            scanned_dirs: int,
+            elapsed: float,
+            error: Exception | None,
+        ) -> None:
+            self.filter_active = False
+            if error is not None:
+                self._set_status(f"Filter failed: {error}")
+                self.notify(f"Filter failed: {error}", severity="error")
+                return
+            self._set_status(
+                f"Filter complete: {len(paths)} match(es), {scanned_dirs} dirs in {elapsed:.1f}s"
+            )
+            if not paths:
+                self.notify(
+                    f"No paths named {keyword!r} under {root}; exclude={exclude!r}",
+                    severity="warning",
+                )
+                return
+
+            def after_results(selected: list[str] | None) -> None:
+                if not selected:
+                    return
+                preview = "\n".join(selected[:20])
+                suffix = "" if len(selected) <= 20 else f"\n... and {len(selected) - 20} more"
+                message = (
+                    f"Permanently delete {len(selected)} filtered item(s)?\n"
+                    f"{preview}{suffix}\n\n"
+                    "Press y to confirm, n or Esc to cancel."
+                )
+
+                def after_confirm(confirm: bool) -> None:
+                    if confirm:
+                        self._start_delete(selected, permanent=True, trash=False)
+
+                self.push_screen(ConfirmScreen(message), after_confirm)
+
+            self.push_screen(FilterResultsScreen(root, paths), after_results)
+
         def action_sort_size(self) -> None:
             self.sort_by = "size"
             self._reload_table()
@@ -365,16 +628,24 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
                 self.call_from_thread(self._set_status, f"{action} {len(targets)} item(s) with 2 workers...")
                 totals = {target: self._delete_total(target) for target in targets}
                 started_at = time.monotonic()
+                latest_counts = {target: 0 for target in targets}
+                progress_lock = threading.Lock()
 
                 def progress(target: str, count: int, path: str) -> None:
-                    elapsed = max(time.monotonic() - started_at, 0.001)
-                    rate = count / elapsed
-                    total = totals.get(target)
+                    with progress_lock:
+                        latest_counts[target] = max(latest_counts[target], count)
+                        processed = sum(latest_counts.values())
+                        elapsed = max(time.monotonic() - started_at, 0.001)
+                        rate = processed / elapsed
+                        known_total = all(total is not None for total in totals.values())
+                        total = sum(int(value) for value in totals.values()) if known_total else None
                     total_text = "?" if total is None else str(total)
-                    pct_text = "" if total is None else f" {min(100.0, count * 100.0 / total):5.1f}%"
+                    pct_text = "" if total is None else f" {min(100.0, processed * 100.0 / total):5.1f}%"
+                    eta_text = " ETA=?" if total is None or rate <= 0 else f" ETA={_eta((total - processed) / rate)}"
                     self.call_from_thread(
                         self._set_status,
-                        f"Deleting {_progress_bar(count, total)}{pct_text} {count}/{total_text} {rate:.1f}/s current={path}",
+                        f"Deleting {_progress_bar(processed, total)}{pct_text} "
+                        f"{processed}/{total_text} {rate:.1f}/s{eta_text} current={path}",
                     )
 
                 def status(target: str, phase: str) -> None:
