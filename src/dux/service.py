@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fnmatch
 import os
 import queue
 import shutil
@@ -33,6 +34,12 @@ class FilterResult:
     paths: list[str]
     scanned_dirs: int
     elapsed_seconds: float
+
+
+class DeleteCancelled(RuntimeError):
+    def __init__(self, completed_targets: list[str]) -> None:
+        super().__init__("delete cancelled after synchronizing the index")
+        self.completed_targets = completed_targets
 
 
 class DuxService:
@@ -94,7 +101,7 @@ class DuxService:
                     if exclude and exclude in os.path.relpath(entry.path, root):
                         continue
                     is_dir = entry.is_dir(follow_symlinks=False)
-                    if entry.name == keyword:
+                    if fnmatch.fnmatchcase(entry.name, keyword):
                         with matches_lock:
                             matches.append(entry.path)
                         continue
@@ -232,29 +239,23 @@ class DuxService:
         progress: Callable[[int, str], None] | None = None,
         progress_interval: int = 1000,
         unlink_workers: int = 8,
+        cancel_event: threading.Event | None = None,
     ) -> str:
-        if permanent == trash:
-            raise ValueError("choose exactly one of permanent or trash")
+        def report(_target: str, count: int, current_path: str) -> None:
+            if progress is not None:
+                progress(count, current_path)
 
-        target = self.canonical(path)
-        row = db.fetch_node(self.conn, target)
-        if row is None and not Path(target).exists():
-            raise FileNotFoundError(target)
-
-        destination = ""
-        if trash:
-            destination = self._move_to_trash(target)
-        elif permanent:
-            self._remove_from_fs(
-                target,
-                progress=progress,
-                progress_interval=progress_interval,
-                unlink_workers=unlink_workers,
-            )
-
-        if row is not None:
-            self._delete_subtree_from_index(target)
-        return destination
+        destinations = self.delete_paths(
+            [path],
+            permanent=permanent,
+            trash=trash,
+            progress=report,
+            progress_interval=progress_interval,
+            workers=1,
+            unlink_workers=unlink_workers,
+            cancel_event=cancel_event,
+        )
+        return destinations[0]
 
     def delete_paths(
         self,
@@ -267,10 +268,12 @@ class DuxService:
         progress_interval: int = 1000,
         workers: int = 2,
         unlink_workers: int = 8,
+        cancel_event: threading.Event | None = None,
     ) -> list[str]:
         if permanent == trash:
             raise ValueError("choose exactly one of permanent or trash")
 
+        operation_cancel = cancel_event or threading.Event()
         targets: list[tuple[str, bool]] = []
         for path in paths:
             target = self.canonical(path)
@@ -279,35 +282,117 @@ class DuxService:
                 raise FileNotFoundError(target)
             targets.append((target, row is not None))
 
-        def remove_target(target: str) -> str:
+        deleted_queue: queue.Queue[tuple[str, bool] | None] = queue.Queue(maxsize=65536)
+        writer_errors: list[BaseException] = []
+
+        def write_deleted(path: str, is_dir: bool) -> None:
+            while True:
+                if writer_errors:
+                    raise writer_errors[0]
+                try:
+                    deleted_queue.put((path, is_dir), timeout=0.1)
+                    return
+                except queue.Full:
+                    continue
+
+        def index_writer() -> None:
+            batch: list[tuple[str, bool]] = []
+            last_flush = time.monotonic()
+
+            def flush() -> None:
+                nonlocal last_flush
+                if batch:
+                    db.delete_nodes_incremental(self.conn, batch)
+                    batch.clear()
+                last_flush = time.monotonic()
+
+            try:
+                while True:
+                    timeout = max(0.0, 0.2 - (time.monotonic() - last_flush))
+                    try:
+                        item = deleted_queue.get(timeout=timeout)
+                    except queue.Empty:
+                        flush()
+                        continue
+                    if item is None:
+                        flush()
+                        return
+                    batch.append(item)
+                    if len(batch) >= 5000 or time.monotonic() - last_flush >= 0.2:
+                        flush()
+            except BaseException as exc:
+                writer_errors.append(exc)
+                operation_cancel.set()
+
+        def remove_target(target: str) -> tuple[str, bool]:
             if trash:
-                return self._move_to_trash(target)
+                if operation_cancel.is_set():
+                    return "", False
+                return self._move_to_trash(target), True
 
             def report(count: int, current_path: str) -> None:
                 if progress is not None:
                     progress(target, count, current_path)
 
-            self._remove_from_fs(
+            completed = self._remove_from_fs(
                 target,
                 progress=report,
                 progress_interval=progress_interval,
                 unlink_workers=unlink_workers,
+                cancel_event=operation_cancel,
+                deleted=write_deleted,
             )
-            return ""
+            return "", completed
 
         destinations: list[str] = []
+        completed_targets: list[str] = []
+        was_cancelled = False
+        delete_errors: list[BaseException] = []
+        writer_thread: threading.Thread | None = None
+        if permanent:
+            writer_thread = threading.Thread(target=index_writer, name="dux-delete-index-writer")
+            writer_thread.start()
         with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
             futures = {pool.submit(remove_target, target): (target, indexed) for target, indexed in targets}
             for future in as_completed(futures):
                 target, indexed = futures[future]
-                destination = future.result()
+                try:
+                    destination, completed = future.result()
+                except BaseException as exc:
+                    operation_cancel.set()
+                    delete_errors.append(exc)
+                    continue
                 destinations.append(destination)
-                if indexed:
-                    if status is not None:
-                        status(target, "updating-index")
-                    self._delete_subtree_from_index(target)
-                    if status is not None:
-                        status(target, "index-updated")
+                if completed:
+                    completed_targets.append(target)
+                else:
+                    was_cancelled = True
+
+        if writer_thread is not None:
+            if status is not None:
+                for target, _indexed in targets:
+                    status(target, "flushing-index")
+            while writer_thread.is_alive() and not writer_errors:
+                try:
+                    deleted_queue.put(None, timeout=0.1)
+                    break
+                except queue.Full:
+                    continue
+            writer_thread.join()
+        if writer_errors:
+            raise writer_errors[0]
+
+        indexed_targets = dict(targets)
+        for target in completed_targets:
+            if indexed_targets[target]:
+                self._delete_subtree_from_index(target)
+            if status is not None:
+                status(target, "index-synced")
+
+        if delete_errors:
+            raise delete_errors[0]
+        if was_cancelled:
+            raise DeleteCancelled(completed_targets)
         return destinations
 
     def list_children(self, path: str, sort_by: str = "size", reverse: bool = True) -> list[sqlite3.Row]:
@@ -477,22 +562,34 @@ class DuxService:
         progress: Callable[[int, str], None] | None = None,
         progress_interval: int = 1000,
         unlink_workers: int = 8,
-    ) -> None:
+        cancel_event: threading.Event | None = None,
+        deleted: Callable[[str, bool], None] | None = None,
+    ) -> bool:
         target = Path(path)
         if target.is_dir() and not target.is_symlink():
-            count = self._remove_dir_parallel(
+            count, completed = self._remove_dir_parallel(
                 target,
                 progress=progress,
                 progress_interval=progress_interval,
                 workers=unlink_workers,
+                cancel_event=cancel_event,
+                deleted=deleted,
             )
             if progress:
                 progress(count, str(target))
+            return completed
+        if cancel_event is not None and cancel_event.is_set():
+            return False
         else:
             with self.delete_slots:
+                if cancel_event is not None and cancel_event.is_set():
+                    return False
                 target.unlink()
+            if deleted is not None:
+                deleted(str(target), False)
             if progress:
                 progress(1, str(target))
+            return True
 
     @staticmethod
     def _unlink_path(path: Path) -> str:
@@ -506,7 +603,9 @@ class DuxService:
         progress: Callable[[int, str], None] | None,
         progress_interval: int,
         workers: int,
-    ) -> int:
+        cancel_event: threading.Event | None,
+        deleted: Callable[[str, bool], None] | None,
+    ) -> tuple[int, bool]:
         worker_count = max(1, workers)
         dir_queue: queue.Queue[Path | None] = queue.Queue()
         unlink_queue: queue.Queue[str | None] = queue.Queue(maxsize=worker_count * 16)
@@ -518,6 +617,12 @@ class DuxService:
         error_lock = threading.Lock()
         stop_event = threading.Event()
         count = 0
+
+        def cancelled() -> bool:
+            return cancel_event is not None and cancel_event.is_set()
+
+        def should_stop() -> bool:
+            return stop_event.is_set() or cancelled()
 
         def bump(current_path: str) -> None:
             nonlocal count
@@ -534,7 +639,7 @@ class DuxService:
             stop_event.set()
 
         def queue_unlink(path: str) -> None:
-            while not stop_event.is_set():
+            while not should_stop():
                 try:
                     unlink_queue.put(path, timeout=0.1)
                     return
@@ -547,7 +652,7 @@ class DuxService:
                 try:
                     if current_dir is None:
                         return
-                    if stop_event.is_set():
+                    if should_stop():
                         continue
                     with dirs_lock:
                         dirs.append(current_dir)
@@ -555,9 +660,11 @@ class DuxService:
                         child_dirs: list[Path] = []
                         child_files: list[str] = []
                         with self.delete_slots:
+                            if should_stop():
+                                continue
                             with os.scandir(current_dir) as entries:
                                 for entry in entries:
-                                    if stop_event.is_set():
+                                    if should_stop():
                                         break
                                     if entry.is_dir(follow_symlinks=False):
                                         child_dirs.append(Path(entry.path))
@@ -578,11 +685,15 @@ class DuxService:
                 try:
                     if path is None:
                         return
-                    if stop_event.is_set():
+                    if should_stop():
                         continue
                     try:
                         with self.delete_slots:
+                            if should_stop():
+                                continue
                             self._unlink_path(Path(path))
+                        if deleted is not None:
+                            deleted(path, False)
                         bump(path)
                     except BaseException as exc:
                         record_error(exc)
@@ -616,23 +727,33 @@ class DuxService:
         if errors:
             raise errors[0]
 
+        if cancelled():
+            return count, not target.exists()
+
         dirs_by_depth: dict[int, list[Path]] = defaultdict(list)
         for dir_path in dirs:
             dirs_by_depth[len(dir_path.parts)].append(dir_path)
 
         with ThreadPoolExecutor(max_workers=worker_count) as pool:
             for depth in sorted(dirs_by_depth, reverse=True):
+                if cancelled():
+                    break
                 future_to_dir = {
-                    pool.submit(self._rmdir_with_slot, dir_path): dir_path
+                    pool.submit(self._rmdir_with_slot, dir_path, cancel_event): dir_path
                     for dir_path in dirs_by_depth[depth]
                 }
                 for future in as_completed(future_to_dir):
                     dir_path = future_to_dir[future]
-                    future.result()
-                    bump(str(dir_path))
+                    if future.result():
+                        if deleted is not None and dir_path != target:
+                            deleted(str(dir_path), True)
+                        bump(str(dir_path))
 
-        return count
+        return count, not target.exists()
 
-    def _rmdir_with_slot(self, path: Path) -> None:
+    def _rmdir_with_slot(self, path: Path, cancel_event: threading.Event | None) -> bool:
         with self.delete_slots:
+            if cancel_event is not None and cancel_event.is_set():
+                return False
             path.rmdir()
+        return True

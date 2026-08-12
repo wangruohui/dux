@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 import time
+from collections import defaultdict
 from pathlib import Path
 
 from .model import NodeRecord
@@ -169,6 +170,63 @@ def delete_subtree_rows(conn: sqlite3.Connection, root_path: str) -> None:
         "DELETE FROM nodes WHERE path = ? OR (path >= ? AND path < ?)",
         (root_path, child_lower, child_upper),
     )
+
+
+def delete_nodes_incremental(conn: sqlite3.Connection, deleted: list[tuple[str, bool]]) -> int:
+    if not deleted:
+        return 0
+
+    paths = list(dict.fromkeys(path for path, _is_dir in deleted))
+    rows: list[sqlite3.Row] = []
+    with conn:
+        for offset in range(0, len(paths), 500):
+            chunk = paths[offset : offset + 500]
+            placeholders = ",".join("?" for _ in chunk)
+            rows.extend(
+                conn.execute(
+                    f"SELECT path, is_dir, size_bytes, file_count FROM nodes WHERE path IN ({placeholders})",
+                    chunk,
+                ).fetchall()
+            )
+
+        deleted_types = dict(deleted)
+        deltas: dict[str, list[int]] = defaultdict(lambda: [0, 0, 0])
+        for row in rows:
+            path = str(row["path"])
+            is_dir = deleted_types.get(path, bool(row["is_dir"]))
+            if is_dir:
+                size_delta, file_delta, dir_delta = 0, 0, -1
+            else:
+                size_delta = -int(row["size_bytes"])
+                file_delta = -int(row["file_count"])
+                dir_delta = 0
+            for parent in Path(path).parents:
+                delta = deltas[str(parent)]
+                delta[0] += size_delta
+                delta[1] += file_delta
+                delta[2] += dir_delta
+
+        for offset in range(0, len(paths), 500):
+            chunk = paths[offset : offset + 500]
+            placeholders = ",".join("?" for _ in chunk)
+            conn.execute(f"DELETE FROM nodes WHERE path IN ({placeholders})", chunk)
+
+        now = time.time()
+        conn.executemany(
+            """
+            UPDATE nodes
+            SET size_bytes = size_bytes + ?,
+                file_count = file_count + ?,
+                dir_count = dir_count + ?,
+                updated_at = ?
+            WHERE path = ?
+            """,
+            [
+                (size_delta, file_delta, dir_delta, now, path)
+                for path, (size_delta, file_delta, dir_delta) in deltas.items()
+            ],
+        )
+    return len(rows)
 
 
 def attach_database(conn: sqlite3.Connection, db_path: str | Path, alias: str) -> None:

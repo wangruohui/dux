@@ -9,7 +9,7 @@ from pathlib import Path
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from dux.service import DuxService
+from dux.service import DeleteCancelled, DuxService
 
 
 class ServiceTests(unittest.TestCase):
@@ -260,6 +260,46 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(root["file_count"], 0)
         self.assertGreaterEqual(len(progress), 2)
 
+    def test_cancelled_delete_flushes_incremental_index_updates(self) -> None:
+        sub = self.root / "cancel-me"
+        sub.mkdir()
+        for index in range(200):
+            (sub / f"file-{index}.bin").write_bytes(b"x" * 10)
+        self.service.index_path(str(self.root))
+        self.service.index_path = lambda *_args, **_kwargs: self.fail("cancel must not reindex")
+        cancel_event = threading.Event()
+        deleted_count = 0
+        deleted_lock = threading.Lock()
+        original_unlink = self.service._unlink_path
+
+        def tracked_unlink(path: Path) -> str:
+            nonlocal deleted_count
+            result = original_unlink(path)
+            with deleted_lock:
+                deleted_count += 1
+                if deleted_count >= 20:
+                    cancel_event.set()
+            return result
+
+        self.service._unlink_path = tracked_unlink
+        with self.assertRaises(DeleteCancelled):
+            self.service.delete_path(
+                str(sub),
+                permanent=True,
+                unlink_workers=8,
+                cancel_event=cancel_event,
+            )
+
+        remaining = len(list(sub.iterdir()))
+        self.assertGreater(remaining, 0)
+        self.assertLess(remaining, 200)
+        sub_row = self.service.get_node(str(sub))
+        root_row = self.service.get_node(str(self.root))
+        self.assertEqual(int(sub_row["file_count"]), remaining)
+        self.assertEqual(int(sub_row["size_bytes"]), remaining * 10)
+        self.assertEqual(int(root_row["file_count"]), remaining)
+        self.assertEqual(int(root_row["size_bytes"]), remaining * 10)
+
     def test_filter_paths_prunes_matches_and_excluded_paths(self) -> None:
         keep = self.root / "keep"
         matched_dir = keep / "target"
@@ -291,6 +331,20 @@ class ServiceTests(unittest.TestCase):
     def test_filter_paths_rejects_empty_keyword(self) -> None:
         with self.assertRaisesRegex(ValueError, "must not be empty"):
             self.service.filter_paths(str(self.root), "")
+
+    def test_filter_paths_supports_basename_globs(self) -> None:
+        (self.root / "alpha").mkdir()
+        (self.root / "alpha" / "apple").write_bytes(b"a")
+        (self.root / "beta").mkdir()
+        (self.root / "beta" / "apricot").write_bytes(b"b")
+        (self.root / "beta" / "pear").write_bytes(b"c")
+
+        result = self.service.filter_paths(str(self.root), "a*")
+
+        self.assertEqual(
+            result.paths,
+            [str(self.root / "alpha"), str(self.root / "beta" / "apricot")],
+        )
 
 
 if __name__ == "__main__":

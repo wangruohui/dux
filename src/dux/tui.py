@@ -4,7 +4,7 @@ import threading
 import time
 from pathlib import Path
 
-from .service import DuxService
+from .service import DeleteCancelled, DuxService
 
 
 def _human_bytes(size: int) -> str:
@@ -103,8 +103,8 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
         def compose(self) -> ComposeResult:
             yield Container(
                 Static("Recursive filter from the current directory", classes="dialog-title"),
-                Label("Exact name to find"),
-                Input(placeholder="required exact file or directory name", id="filter-keyword"),
+                Label("Name pattern to find"),
+                Input(placeholder="required basename glob, e.g. a*", id="filter-keyword"),
                 Label("Exclude paths containing"),
                 Input(placeholder="optional; matching directories are pruned", id="filter-exclude"),
                 Label("Enter: next/start    Esc: cancel"),
@@ -283,6 +283,7 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
             Binding("backspace", "go_parent", "Up"),
             Binding("r", "refresh_current", "Refresh"),
             Binding("f", "filter_paths", "Filter"),
+            Binding("x", "cancel_delete", "Cancel Delete"),
             Binding("space", "toggle_select", "Select"),
             Binding("delete", "delete_requested", "Delete"),
             Binding("shift+delete", "delete_requested", "Delete"),
@@ -303,6 +304,7 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
             self.marked_paths: set[str] = set()
             self.delete_slots = threading.BoundedSemaphore(256)
             self.delete_jobs: dict[int, str] = {}
+            self.delete_cancel_events: dict[int, threading.Event] = {}
             self.deleting_paths: set[str] = set()
             self.next_delete_job_id = 1
             self.delete_jobs_lock = threading.Lock()
@@ -492,10 +494,11 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
                 keyword, exclude = query
                 root = self.current_path
                 self.filter_active = True
-                self._set_status(f"Filtering {root} exact={keyword!r} exclude={exclude!r}...")
+                self._set_status(f"Filtering {root} pattern={keyword!r} exclude={exclude!r}...")
                 self.run_worker(
                     lambda: self._filter_worker(root, keyword, exclude),
                     thread=True,
+                    exclusive=False,
                 )
 
             self.push_screen(FilterQueryScreen(), after_query)
@@ -560,7 +563,7 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
             )
             if not paths:
                 self.notify(
-                    f"No paths named {keyword!r} under {root}; exclude={exclude!r}",
+                    f"No paths matching {keyword!r} under {root}; exclude={exclude!r}",
                     severity="warning",
                 )
                 return
@@ -633,15 +636,23 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
                     return
                 job_id = self.next_delete_job_id
                 self.next_delete_job_id += 1
+                cancel_event = threading.Event()
                 self.deleting_paths.update(targets)
                 self.delete_jobs[job_id] = f"queued {len(targets)} item(s)"
+                self.delete_cancel_events[job_id] = cancel_event
             action = "Moving to trash" if trash else "Deleting"
             self._show_delete_job_status(job_id, f"{action} {len(targets)} item(s)...")
             self.notify(
                 f"Delete job {job_id}: {action.lower()} {len(targets)} item(s). UI remains responsive."
             )
             self.run_worker(
-                lambda: self._delete_worker(job_id, targets, permanent=permanent, trash=trash),
+                lambda: self._delete_worker(
+                    job_id,
+                    targets,
+                    cancel_event,
+                    permanent=permanent,
+                    trash=trash,
+                ),
                 thread=True,
                 exclusive=False,
             )
@@ -653,10 +664,24 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
                 active_count = len(self.delete_jobs)
             self._set_status(f"Delete jobs={active_count} | job {job_id}: {message}")
 
+        def action_cancel_delete(self) -> None:
+            with self.delete_jobs_lock:
+                jobs = list(self.delete_cancel_events.items())
+                for job_id, cancel_event in jobs:
+                    cancel_event.set()
+                    self.delete_jobs[job_id] = "cancel requested; synchronizing index"
+            if not jobs:
+                self.notify("No active delete jobs.", severity="warning")
+                return
+            job_ids = ", ".join(str(job_id) for job_id, _event in jobs)
+            self._set_status(f"Cancelling delete job(s) {job_ids}; synchronizing index...")
+            self.notify(f"Cancellation requested for delete job(s): {job_ids}")
+
         def _delete_worker(
             self,
             job_id: int,
             targets: list[str],
+            cancel_event: threading.Event,
             *,
             permanent: bool,
             trash: bool,
@@ -700,13 +725,13 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
                     )
 
                 def status(target: str, phase: str) -> None:
-                    if phase == "updating-index":
+                    if phase == "flushing-index":
                         self.call_from_thread(
-                            self._show_delete_job_status, job_id, f"Updating index: {target}"
+                            self._show_delete_job_status, job_id, f"Flushing index updates: {target}"
                         )
-                    elif phase == "index-updated":
+                    elif phase == "index-synced":
                         self.call_from_thread(
-                            self._show_delete_job_status, job_id, f"Index updated: {target}"
+                            self._show_delete_job_status, job_id, f"Index synchronized: {target}"
                         )
 
                 delete_service.delete_paths(
@@ -718,11 +743,21 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
                     progress_interval=1000,
                     workers=target_workers,
                     unlink_workers=unlink_workers,
+                    cancel_event=cancel_event,
                 )
                 completed = targets
-                self.call_from_thread(self._finish_delete, job_id, targets, completed, None)
+                self.call_from_thread(self._finish_delete, job_id, targets, completed, None, False)
+            except DeleteCancelled as exc:
+                self.call_from_thread(
+                    self._finish_delete,
+                    job_id,
+                    targets,
+                    exc.completed_targets,
+                    None,
+                    True,
+                )
             except Exception as exc:
-                self.call_from_thread(self._finish_delete, job_id, targets, completed, exc)
+                self.call_from_thread(self._finish_delete, job_id, targets, completed, exc, False)
             finally:
                 delete_service.close()
 
@@ -738,9 +773,11 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
             targets: list[str],
             completed: list[str],
             error: Exception | None,
+            cancelled: bool,
         ) -> None:
             with self.delete_jobs_lock:
                 self.delete_jobs.pop(job_id, None)
+                self.delete_cancel_events.pop(job_id, None)
                 self.deleting_paths.difference_update(targets)
                 remaining_jobs = len(self.delete_jobs)
             for target in completed:
@@ -750,7 +787,12 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
                 for path in self.marked_paths
                 if not any(path == target or path.startswith(target.rstrip("/") + "/") for target in completed)
             }
-            if error is not None:
+            if cancelled:
+                self._set_status(
+                    f"Delete job {job_id} cancelled; index synchronized; active jobs={remaining_jobs}"
+                )
+                self.notify(f"Delete job {job_id} cancelled; index synchronized.")
+            elif error is not None:
                 self._set_status(
                     f"Delete job {job_id} failed; active jobs={remaining_jobs}: {error}"
                 )
