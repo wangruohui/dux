@@ -85,7 +85,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "ls":
             path = service.canonical(args.path)
             mtimes = service.stat_visible_children(path)
-            rows = service.list_children(path, sort_by="size" if args.sort == "mtime" else args.sort, reverse=args.sort != "name")
+            rows = service.list_children(path, sort_by="size" if args.sort == "mtime" else args.sort, reverse=True)
             if args.sort == "mtime":
                 rows = sorted(rows, key=lambda row: (mtimes.get(row["path"], 0.0), row["name"]), reverse=True)
             for row in rows:

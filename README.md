@@ -152,6 +152,10 @@ The graph column follows the active metric: size mode uses bytes, count mode use
 
 右侧比例条跟随当前排序指标：大小模式按 bytes，文件数模式按递归文件数。
 
+All sort keys use descending order, and unindexed entries are always listed after indexed entries.
+
+所有排序键都按从大到小排列，未统计项始终排在已统计项之后。
+
 During deletion, the status line reports the active phase. File removal shows a progress bar, processed entry count, throughput, and current path; after files are removed, `Updating index...` means SQLite is removing the subtree rows and propagating parent totals.
 
 删除过程中，状态栏会显示当前阶段。文件删除阶段会显示进度条、已处理条目数、吞吐和当前路径；文件删完后出现 `Updating index...` 表示 SQLite 正在删除子树索引并同步父级聚合值。

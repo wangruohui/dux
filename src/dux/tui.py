@@ -318,7 +318,7 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
 
         def action_sort_name(self) -> None:
             self.sort_by = "name"
-            self.reverse = False
+            self.reverse = True
             self._reload_table()
 
         def action_delete_requested(self) -> None:

@@ -306,6 +306,7 @@ class DuxService:
                 ),
                 reverse=reverse,
             )
+        rows.sort(key=lambda row: bool(row["indexed"]), reverse=True)
         return rows, truncated
 
     def stat_visible_children(self, path: str) -> dict[str, float]:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import tempfile
 import threading
 import unittest
@@ -132,6 +133,28 @@ class ServiceTests(unittest.TestCase):
         self.assertFalse(by_name["sibling"]["indexed"])
         self.assertTrue(by_name["sibling"]["live_only"])
         self.assertIsNone(by_name["sibling"]["size_bytes"])
+
+    def test_visible_children_sort_descending_with_unindexed_last(self) -> None:
+        alpha = self.root / "alpha"
+        beta = self.root / "beta"
+        zulu = self.root / "zulu"
+        alpha.mkdir()
+        beta.mkdir()
+        zulu.mkdir()
+        (alpha / "small.bin").write_bytes(b"a")
+        (beta / "large.bin").write_bytes(b"b" * 10)
+        (beta / "extra.bin").write_bytes(b"c" * 10)
+        self.service.index_path(str(alpha))
+        self.service.index_path(str(beta))
+        os.utime(alpha, (100, 100))
+        os.utime(beta, (200, 200))
+        os.utime(zulu, (300, 300))
+
+        for sort_by in ("size", "count", "mtime", "name"):
+            rows, _ = self.service.list_visible_children(
+                str(self.root), sort_by=sort_by, reverse=True, live_limit=10
+            )
+            self.assertEqual([row["name"] for row in rows], ["beta", "alpha", "zulu"])
 
     def test_delete_unindexed_live_path(self) -> None:
         sub = self.root / "sub"
