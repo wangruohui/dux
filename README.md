@@ -18,7 +18,7 @@ Path: /data/project                         Sort: size
 └──────────┴───────────┴────────────┴──────────────────────────────┴────────────────────┘
 
 Enter open  Backspace parent  Space select  Del/Shift+Del delete
-s size  c count  m date  n name  r refresh  f filter  x cancel delete  q quit
+s size  c count  m date  n name  r refresh  f filter  x cancel latest  q quit
 ```
 
 `dux` answers the cleanup question quickly: what is using space, how many files are there, what changed, and what can be safely removed?
@@ -41,8 +41,8 @@ s size  c count  m date  n name  r refresh  f filter  x cancel delete  q quit
 - **部分索引导航**：已统计子树的父路径会保留导航骨架，未统计的现场条目标记为 `unindexed`。
 - **Cursor and batch delete**: use `Delete` or `Shift+Delete` to delete the current row, or `Space` to mark multiple rows and delete them together.
 - **光标和批量删除**：`Delete` 或 `Shift+Delete` 删除当前行；也可以用 `Space` 标记多行后一起删除。
-- **Responsive deletion**: deletion runs in background workers with a status line showing progress, rate, current path, and index-sync phase; press `x` to cancel active delete jobs.
-- **响应式删除**：删除在后台 worker 中执行，状态栏会显示进度、速度、当前路径和索引同步阶段；按 `x` 可取消正在运行的删除任务。
+- **Responsive deletion**: deletion runs in background workers with a status line showing progress, rate, current path, and index-sync phase; press `x` to cancel the latest active delete job.
+- **响应式删除**：删除在后台 worker 中执行，状态栏会显示进度、速度、当前路径和索引同步阶段；按 `x` 可取消最近启动的删除任务。
 - **Parallel cleanup**: multiple selected roots can be deleted concurrently; each directory tree is scanned and unlinked with worker threads.
 - **并行清理**：多个选中根目录可以并发删除；单个目录树内部也会用 worker 线程并行扫描和 unlink。
 - **Explicit confirmation**: destructive UI deletes always show a confirmation dialog before running.
@@ -139,8 +139,8 @@ dux --workers 16 index /data/project
 - `r`：刷新当前子树。
 - `f`: recursively find file/directory basenames using shell globs such as `a*`, with optional exclude-path pruning; it remains available while deletion runs.
 - `f`：在当前目录下递归使用 `a*` 等 shell 通配符匹配文件或目录 basename，可填写 exclude 关键字剪枝；删除期间仍可使用。
-- `x`: cancel all active delete jobs; completed filesystem deletions are flushed to SQLite before cancellation finishes.
-- `x`：取消所有正在运行的删除任务；取消完成前，已经删除的文件和目录会同步写入 SQLite。
+- `x`: cancel the most recently started job that has not already received a cancellation request. Press repeatedly to cancel the remaining jobs one by one. Completed filesystem deletions are flushed to SQLite before each cancellation finishes.
+- `x`：取消最近启动且尚未请求取消的任务；重复按下可依次取消其余任务。每个任务取消完成前，已经删除的文件和目录都会同步写入 SQLite。
 - `s`: sort by size.
 - `s`：按大小排序。
 - `c`: sort by recursive file count.

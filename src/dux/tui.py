@@ -283,7 +283,7 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
             Binding("backspace", "go_parent", "Up"),
             Binding("r", "refresh_current", "Refresh"),
             Binding("f", "filter_paths", "Filter"),
-            Binding("x", "cancel_delete", "Cancel Delete"),
+            Binding("x", "cancel_delete", "Cancel Latest"),
             Binding("space", "toggle_select", "Select"),
             Binding("delete", "delete_requested", "Delete"),
             Binding("shift+delete", "delete_requested", "Delete"),
@@ -661,21 +661,49 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
             with self.delete_jobs_lock:
                 if job_id in self.delete_jobs:
                     self.delete_jobs[job_id] = message
+            self._render_delete_status()
+
+        def _render_delete_status(self) -> bool:
+            with self.delete_jobs_lock:
+                if not self.delete_jobs:
+                    return False
+                cancellable = [
+                    job_id
+                    for job_id, cancel_event in self.delete_cancel_events.items()
+                    if not cancel_event.is_set()
+                ]
+                focus_job_id = max(cancellable) if cancellable else max(self.delete_jobs)
+                message = self.delete_jobs[focus_job_id]
                 active_count = len(self.delete_jobs)
-            self._set_status(f"Delete jobs={active_count} | job {job_id}: {message}")
+                cancelling_count = sum(
+                    cancel_event.is_set() for cancel_event in self.delete_cancel_events.values()
+                )
+            cancelling = f" cancelling={cancelling_count}" if cancelling_count else ""
+            self._set_status(
+                f"Delete jobs={active_count}{cancelling} | job {focus_job_id}: {message}"
+            )
+            return True
 
         def action_cancel_delete(self) -> None:
             with self.delete_jobs_lock:
-                jobs = list(self.delete_cancel_events.items())
-                for job_id, cancel_event in jobs:
-                    cancel_event.set()
+                cancellable = [
+                    job_id
+                    for job_id, cancel_event in self.delete_cancel_events.items()
+                    if not cancel_event.is_set()
+                ]
+                active_count = len(self.delete_jobs)
+                job_id = max(cancellable) if cancellable else None
+                if job_id is not None:
+                    self.delete_cancel_events[job_id].set()
                     self.delete_jobs[job_id] = "cancel requested; synchronizing index"
-            if not jobs:
+            if not active_count:
                 self.notify("No active delete jobs.", severity="warning")
                 return
-            job_ids = ", ".join(str(job_id) for job_id, _event in jobs)
-            self._set_status(f"Cancelling delete job(s) {job_ids}; synchronizing index...")
-            self.notify(f"Cancellation requested for delete job(s): {job_ids}")
+            if job_id is None:
+                self.notify("All active delete jobs are already cancelling.", severity="warning")
+                return
+            self._render_delete_status()
+            self.notify(f"Cancellation requested for latest delete job {job_id}.")
 
         def _delete_worker(
             self,
@@ -788,20 +816,18 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
                 if not any(path == target or path.startswith(target.rstrip("/") + "/") for target in completed)
             }
             if cancelled:
-                self._set_status(
-                    f"Delete job {job_id} cancelled; index synchronized; active jobs={remaining_jobs}"
-                )
-                self.notify(f"Delete job {job_id} cancelled; index synchronized.")
+                outcome = f"Delete job {job_id} cancelled; index synchronized."
+                self.notify(outcome)
             elif error is not None:
-                self._set_status(
-                    f"Delete job {job_id} failed; active jobs={remaining_jobs}: {error}"
-                )
-                self.notify(f"Delete job {job_id} failed: {error}", severity="error")
+                outcome = f"Delete job {job_id} failed: {error}"
+                self.notify(outcome, severity="error")
             else:
-                self._set_status(
-                    f"Delete job {job_id} finished: {len(completed)} item(s); active jobs={remaining_jobs}"
-                )
-                self.notify(f"Delete job {job_id} finished: {len(completed)} item(s)")
+                outcome = f"Delete job {job_id} finished: {len(completed)} item(s)"
+                self.notify(outcome)
+            if remaining_jobs:
+                self._render_delete_status()
+            else:
+                self._set_status(outcome)
             self._reload_table()
 
     DuxApp().run()
