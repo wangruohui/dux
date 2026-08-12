@@ -230,6 +230,38 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(root["file_count"], 0)
         self.assertGreaterEqual(len(progress), 2)
 
+    def test_filter_paths_prunes_matches_and_excluded_paths(self) -> None:
+        keep = self.root / "keep"
+        matched_dir = keep / "target"
+        nested_match = matched_dir / "nested" / "target"
+        separate_match = self.root / "other" / "target"
+        excluded_match = self.root / "skip-heavy" / "target"
+        nested_match.parent.mkdir(parents=True)
+        separate_match.parent.mkdir(parents=True)
+        excluded_match.parent.mkdir(parents=True)
+        nested_match.write_bytes(b"nested")
+        separate_match.write_bytes(b"separate")
+        excluded_match.write_bytes(b"excluded")
+
+        progress: list[tuple[int, int, str]] = []
+        result = self.service.filter_paths(
+            str(self.root),
+            "target",
+            exclude="heavy",
+            progress=lambda dirs, matches, path: progress.append((dirs, matches, path)),
+            progress_interval=1,
+        )
+
+        self.assertEqual(result.paths, [str(matched_dir), str(separate_match)])
+        self.assertNotIn(str(nested_match), result.paths)
+        self.assertNotIn(str(excluded_match), result.paths)
+        self.assertGreaterEqual(result.scanned_dirs, 3)
+        self.assertTrue(progress)
+
+    def test_filter_paths_rejects_empty_keyword(self) -> None:
+        with self.assertRaisesRegex(ValueError, "must not be empty"):
+            self.service.filter_paths(str(self.root), "")
+
 
 if __name__ == "__main__":
     unittest.main()

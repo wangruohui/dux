@@ -28,6 +28,13 @@ class IndexResult:
     scan: ScanResult
 
 
+@dataclass(slots=True)
+class FilterResult:
+    paths: list[str]
+    scanned_dirs: int
+    elapsed_seconds: float
+
+
 class DuxService:
     def __init__(self, db_path: str | Path | None = None, max_workers: int = 256) -> None:
         self.conn = db.connect(db_path)
@@ -38,6 +45,94 @@ class DuxService:
 
     def canonical(self, path: str | os.PathLike[str]) -> str:
         return str(Path(path).expanduser().resolve())
+
+    def filter_paths(
+        self,
+        path: str,
+        keyword: str,
+        exclude: str = "",
+        progress: Callable[[int, int, str], None] | None = None,
+        progress_interval: int = 100,
+    ) -> FilterResult:
+        if not keyword:
+            raise ValueError("filter keyword must not be empty")
+
+        root = self.canonical(path)
+        if not Path(root).is_dir():
+            raise NotADirectoryError(root)
+
+        started_at = time.monotonic()
+        work: queue.Queue[str | None] = queue.Queue()
+        work.put(root)
+        matches: list[str] = []
+        matches_lock = threading.Lock()
+        progress_lock = threading.Lock()
+        stop_event = threading.Event()
+        errors: list[BaseException] = []
+        error_lock = threading.Lock()
+        scanned_dirs = 0
+
+        def record_error(exc: BaseException) -> None:
+            with error_lock:
+                if not errors:
+                    errors.append(exc)
+            stop_event.set()
+
+        def handle_dir(directory: str) -> None:
+            nonlocal scanned_dirs
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    if stop_event.is_set():
+                        return
+                    relative_path = os.path.relpath(entry.path, root)
+                    if exclude and exclude in relative_path:
+                        continue
+                    is_dir = entry.is_dir(follow_symlinks=False)
+                    if entry.name == keyword:
+                        with matches_lock:
+                            matches.append(entry.path)
+                        continue
+                    if is_dir:
+                        work.put(entry.path)
+
+            with progress_lock:
+                scanned_dirs += 1
+                current_dirs = scanned_dirs
+                current_matches = len(matches)
+            if progress is not None and progress_interval > 0 and current_dirs % progress_interval == 0:
+                progress(current_dirs, current_matches, directory)
+
+        def worker() -> None:
+            while True:
+                directory = work.get()
+                try:
+                    if directory is None:
+                        return
+                    if stop_event.is_set():
+                        continue
+                    try:
+                        handle_dir(directory)
+                    except BaseException as exc:
+                        record_error(exc)
+                finally:
+                    work.task_done()
+
+        with ThreadPoolExecutor(max_workers=max(1, self.max_workers)) as pool:
+            futures = [pool.submit(worker) for _ in range(max(1, self.max_workers))]
+            work.join()
+            for _ in futures:
+                work.put(None)
+            work.join()
+            for future in futures:
+                future.result()
+
+        if errors:
+            raise errors[0]
+        return FilterResult(
+            paths=sorted(matches),
+            scanned_dirs=scanned_dirs,
+            elapsed_seconds=time.monotonic() - started_at,
+        )
 
     def index_path(
         self,
