@@ -31,7 +31,7 @@ def _canonical(path: str | os.PathLike[str]) -> str:
 def scan_subtree_to_db(
     conn: sqlite3.Connection,
     root_path: str,
-    max_workers: int = 8,
+    max_workers: int = 256,
     progress: ProgressCallback | None = None,
     progress_interval: int = 10000,
     batch_size: int = 5000,

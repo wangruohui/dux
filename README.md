@@ -201,13 +201,13 @@ indexed /data/project size=128849018880 files=240381 dirs=1842 elapsed=12.431s f
 
 ## Worker Count / 并发设置
 
-The default scanner concurrency is **8 worker threads**.
+The default scanner concurrency is **256 worker threads**. This keeps many metadata requests in flight on large directory trees; use `--workers` to tune it for a different filesystem.
 
-默认扫描并发是 **8 个 worker 线程**。
+默认扫描并发是 **256 个 worker 线程**，可在大型目录树上同时发出更多元数据请求；不同文件系统可通过 `--workers` 调整。
 
-More threads are not always faster because directory traversal, Python scheduling, and SQLite writes share one pipeline. Increase `--workers` only after measuring your own tree.
+More threads are not always faster. In the measured directory-heavy tree, 256 workers outperformed 128, while 512 regressed because the metadata service was already saturated.
 
-线程越多不一定越快，因为目录遍历、Python 调度和 SQLite 写入共享同一条流水线。建议根据自己的目录结构实测后再提高 `--workers`。
+线程越多不一定越快。在实测的多目录树中，256 个 worker 快于 128 个，而 512 个因元数据服务达到饱和反而变慢。
 
 ## Install Options / 安装方式
 

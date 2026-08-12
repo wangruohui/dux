@@ -22,7 +22,7 @@ def _human_bytes(size: int) -> str:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="dux")
     parser.add_argument("--db", default=None, help="path to sqlite database")
-    parser.add_argument("--workers", type=int, default=8, help="scanner worker threads (default: 8)")
+    parser.add_argument("--workers", type=int, default=256, help="scanner worker threads (default: 256)")
     parser.add_argument("--progress-interval", type=int, default=10000, help="print one scanned file path per N files")
 
     sub = parser.add_subparsers(dest="command", required=True)

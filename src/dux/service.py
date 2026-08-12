@@ -29,7 +29,7 @@ class IndexResult:
 
 
 class DuxService:
-    def __init__(self, db_path: str | Path | None = None, max_workers: int = 8) -> None:
+    def __init__(self, db_path: str | Path | None = None, max_workers: int = 256) -> None:
         self.conn = db.connect(db_path)
         self.max_workers = max_workers
 
