@@ -3,7 +3,6 @@ from __future__ import annotations
 import os
 import queue
 import sqlite3
-import stat
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -115,11 +114,13 @@ def scan_subtree_to_db(
                 for entry in it:
                     child_path = entry.path
                     try:
-                        st = entry.stat(follow_symlinks=False)
+                        is_dir = entry.is_dir(follow_symlinks=False)
+                        size_bytes = (
+                            0 if is_dir else int(entry.stat(follow_symlinks=False).st_size)
+                        )
                     except OSError:
                         continue
 
-                    is_dir = stat.S_ISDIR(st.st_mode)
                     records.append(
                         NodeRecord(
                             path=child_path,
@@ -128,7 +129,7 @@ def scan_subtree_to_db(
                             is_dir=is_dir,
                             indexed=True,
                             depth=dir_depth + 1,
-                            size_bytes=0 if is_dir else int(st.st_size),
+                            size_bytes=size_bytes,
                             file_count=0 if is_dir else 1,
                             dir_count=0,
                         )
