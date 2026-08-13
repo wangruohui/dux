@@ -54,3 +54,11 @@
 ## Filter 混合扫描
 
 - DONE：filter 合并只读 SQLite 候选与实时文件系统递归结果；只返回现场存在的并集，并显示 indexed-live、live-only 和 stale-db 数量；mismatch 单测与完整 TUI 流程通过。
+
+## Filter 取消
+
+目标：filter 递归检索进行时允许按 `x` 停止，且不影响已有删除任务的取消语义。
+
+- DONE：`x` 可中断 SQLite 候选查询、现场递归和最终合并；取消后丢弃部分结果并恢复浏览状态。
+- DONE：filter 优先于删除任务响应 `x`；filter 退出后恢复取消最近删除任务的语义。
+- DONE：22 项 unittest、静态编译和 headless TUI 按键优先级冒烟全部通过。

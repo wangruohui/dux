@@ -18,7 +18,7 @@ Path: /data/project                         Sort: size
 └──────────┴───────────┴────────────┴──────────────────────────────┴────────────────────┘
 
 Enter open  Backspace parent  Space select  Del/Shift+Del delete
-s size  c count  m date  n name  r refresh  f filter  x cancel latest  q quit
+s size  c count  m date  n name  r refresh  f filter  x cancel active  q quit
 ```
 
 `dux` answers the cleanup question quickly: what is using space, how many files are there, what changed, and what can be safely removed?
@@ -166,7 +166,11 @@ During deletion, the status line reports the active phase. File removal shows a 
 
 Filter matching is case-sensitive and applies a shell glob to each entry's basename only; `/` is not part of the match. For example, `a*` matches names beginning with `a`. Filter combines read-only SQLite candidates with a live filesystem scan: existing indexed matches and live-only matches are merged, while stale database matches missing from the filesystem are counted but excluded from the selectable deletion list. When a directory matches, it is returned and its descendants are not scanned, following `find ... -prune` semantics. If the relative path contains the exclude keyword, that entry is skipped; excluded directories are not entered.
 
+Press `x` while filtering to stop the active search. The status line changes to `Cancelling filter...` until all scanner workers exit; partial matches are discarded. When no filter is active, `x` keeps its existing behavior of cancelling the latest delete job.
+
 筛选只对每个条目的 basename 做大小写敏感的 shell 通配符匹配，不涉及 `/`；例如 `a*` 匹配所有以 `a` 开头的名称。筛选会合并只读 SQLite 候选和实时文件系统扫描：保留现场存在的 indexed 匹配与 live-only 匹配；数据库中现场已消失的 stale 匹配只计数提示，不进入可选择的删除列表。目录命中后返回该目录且不再扫描其子目录，语义与 `find ... -prune` 一致。相对路径包含 exclude 关键字的条目会被跳过，其中目录不会继续进入。
+
+筛选过程中按 `x` 可停止当前检索；状态栏会显示 `Cancelling filter...`，直到 scanner worker 全部退出，已产生的部分结果不会进入选择表。没有 filter 运行时，`x` 仍用于取消最近一次删除任务。
 
 In the filtered-result delete confirmation, `n` or `Esc` returns to the result table with the previous selections preserved; only `y` closes the result table and starts deletion.
 

@@ -45,6 +45,10 @@ class DeleteCancelled(RuntimeError):
         self.completed_targets = completed_targets
 
 
+class FilterCancelled(RuntimeError):
+    pass
+
+
 class DuxService:
     def __init__(
         self,
@@ -70,6 +74,7 @@ class DuxService:
         exclude: str = "",
         progress: Callable[[int, int, str], None] | None = None,
         progress_interval: int = 100,
+        cancel_event: threading.Event | None = None,
     ) -> FilterResult:
         if not keyword:
             raise ValueError("filter keyword must not be empty")
@@ -78,14 +83,30 @@ class DuxService:
         if not Path(root).is_dir():
             raise NotADirectoryError(root)
 
+        def cancelled() -> bool:
+            return cancel_event is not None and cancel_event.is_set()
+
+        if cancelled():
+            raise FilterCancelled("filter cancelled")
+
         started_at = time.monotonic()
         filter_conn = db.connect(self.db_path)
+        filter_conn.set_progress_handler(lambda: int(cancelled()), 1000)
         try:
-            indexed_rows = db.fetch_filter_candidates(filter_conn, root, keyword)
+            try:
+                indexed_rows = db.fetch_filter_candidates(filter_conn, root, keyword)
+            except sqlite3.OperationalError as exc:
+                if cancelled():
+                    raise FilterCancelled("filter cancelled") from exc
+                raise
         finally:
             filter_conn.close()
+        if cancelled():
+            raise FilterCancelled("filter cancelled")
         indexed_candidates: list[tuple[str, bool]] = []
         for row in indexed_rows:
+            if cancelled():
+                raise FilterCancelled("filter cancelled")
             candidate = str(row["path"])
             if exclude and exclude in os.path.relpath(candidate, root):
                 continue
@@ -99,6 +120,8 @@ class DuxService:
             indexed_candidates,
             key=lambda item: (len(Path(item[0]).parts), item[0]),
         ):
+            if cancelled():
+                raise FilterCancelled("filter cancelled")
             if any(
                 candidate.startswith(matched_dir.rstrip("/") + "/")
                 for matched_dir in matched_index_dirs
@@ -131,7 +154,8 @@ class DuxService:
             nonlocal scanned_dirs
             with os.scandir(directory) as entries:
                 for entry in entries:
-                    if stop_event.is_set():
+                    if stop_event.is_set() or cancelled():
+                        stop_event.set()
                         return
                     if exclude and exclude in os.path.relpath(entry.path, root):
                         continue
@@ -143,6 +167,9 @@ class DuxService:
                     if is_dir:
                         work.put(entry.path)
 
+            if cancelled():
+                stop_event.set()
+                return
             with progress_lock:
                 scanned_dirs += 1
                 current_dirs = scanned_dirs
@@ -157,7 +184,8 @@ class DuxService:
                 try:
                     if directory is None:
                         return
-                    if stop_event.is_set():
+                    if stop_event.is_set() or cancelled():
+                        stop_event.set()
                         continue
                     try:
                         handle_dir(directory)
@@ -179,10 +207,14 @@ class DuxService:
 
         if errors:
             raise errors[0]
+        if cancelled():
+            raise FilterCancelled("filter cancelled")
         combined = set(indexed_live).union(matches)
         final_paths: list[str] = []
         matched_dirs: list[str] = []
         for candidate in sorted(combined, key=lambda item: (len(Path(item).parts), item)):
+            if cancelled():
+                raise FilterCancelled("filter cancelled")
             if any(
                 candidate.startswith(matched_dir.rstrip("/") + "/")
                 for matched_dir in matched_dirs

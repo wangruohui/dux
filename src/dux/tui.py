@@ -4,7 +4,7 @@ import threading
 import time
 from pathlib import Path
 
-from .service import DeleteCancelled, DuxService
+from .service import DeleteCancelled, DuxService, FilterCancelled
 
 
 def _human_bytes(size: int) -> str:
@@ -283,7 +283,7 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
             Binding("backspace", "go_parent", "Up"),
             Binding("r", "refresh_current", "Refresh"),
             Binding("f", "filter_paths", "Filter"),
-            Binding("x", "cancel_delete", "Cancel Latest"),
+            Binding("x", "cancel_delete", "Cancel Active"),
             Binding("space", "toggle_select", "Select"),
             Binding("delete", "delete_requested", "Delete"),
             Binding("shift+delete", "delete_requested", "Delete"),
@@ -308,6 +308,7 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
             self.next_delete_job_id = 1
             self.delete_jobs_lock = threading.Lock()
             self.filter_active = False
+            self.filter_cancel_event: threading.Event | None = None
 
         @property
         def delete_active(self) -> bool:
@@ -501,16 +502,24 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
                 keyword, exclude = query
                 root = self.current_path
                 self.filter_active = True
+                cancel_event = threading.Event()
+                self.filter_cancel_event = cancel_event
                 self._set_status(f"Filtering {root} pattern={keyword!r} exclude={exclude!r}...")
                 self.run_worker(
-                    lambda: self._filter_worker(root, keyword, exclude),
+                    lambda: self._filter_worker(root, keyword, exclude, cancel_event),
                     thread=True,
                     exclusive=False,
                 )
 
             self.push_screen(FilterQueryScreen(), after_query)
 
-        def _filter_worker(self, root: str, keyword: str, exclude: str) -> None:
+        def _filter_worker(
+            self,
+            root: str,
+            keyword: str,
+            exclude: str,
+            cancel_event: threading.Event,
+        ) -> None:
             try:
                 started_at = time.monotonic()
 
@@ -527,6 +536,7 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
                     keyword,
                     exclude=exclude,
                     progress=progress,
+                    cancel_event=cancel_event,
                 )
                 self.call_from_thread(
                     self._finish_filter,
@@ -541,6 +551,21 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
                     result.stale_index_matches,
                     None,
                 )
+            except FilterCancelled:
+                self.call_from_thread(
+                    self._finish_filter,
+                    root,
+                    keyword,
+                    exclude,
+                    [],
+                    0,
+                    0.0,
+                    0,
+                    0,
+                    0,
+                    None,
+                    True,
+                )
             except Exception as exc:
                 self.call_from_thread(
                     self._finish_filter,
@@ -554,6 +579,7 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
                     0,
                     0,
                     exc,
+                    False,
                 )
 
         def _finish_filter(
@@ -568,8 +594,14 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
             live_only_matches: int,
             stale_index_matches: int,
             error: Exception | None,
+            cancelled: bool = False,
         ) -> None:
             self.filter_active = False
+            self.filter_cancel_event = None
+            if cancelled:
+                self._set_status("Filter cancelled.")
+                self.notify("Filter cancelled.")
+                return
             if error is not None:
                 self._set_status(f"Filter failed: {error}")
                 self.notify(f"Filter failed: {error}", severity="error")
@@ -709,6 +741,15 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
             return True
 
         def action_cancel_delete(self) -> None:
+            if self.filter_active:
+                cancel_event = self.filter_cancel_event
+                if cancel_event is not None and not cancel_event.is_set():
+                    cancel_event.set()
+                    self._set_status("Cancelling filter...")
+                    self.notify("Filter cancellation requested.")
+                else:
+                    self.notify("Filter is already cancelling.", severity="warning")
+                return
             with self.delete_jobs_lock:
                 cancellable = [
                     job_id

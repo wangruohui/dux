@@ -443,6 +443,27 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(result.live_only_matches, 1)
         self.assertEqual(result.stale_index_matches, 1)
 
+    def test_filter_paths_can_cancel_during_scan(self) -> None:
+        from dux.service import FilterCancelled
+
+        for index in range(20):
+            directory = self.root / f"dir-{index}"
+            directory.mkdir()
+            (directory / "item").write_bytes(b"x")
+        cancel_event = threading.Event()
+
+        def cancel_after_progress(_dirs: int, _matches: int, _path: str) -> None:
+            cancel_event.set()
+
+        with self.assertRaises(FilterCancelled):
+            self.service.filter_paths(
+                str(self.root),
+                "missing",
+                progress=cancel_after_progress,
+                progress_interval=1,
+                cancel_event=cancel_event,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
