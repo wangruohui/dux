@@ -4,7 +4,7 @@ import threading
 import time
 from pathlib import Path
 
-from .service import DeleteCancelled, DuxService, FilterCancelled
+from .service import DeleteCancelled, DuxService, FilterCancelled, FilterEntry
 
 
 def _human_bytes(size: int) -> str:
@@ -145,10 +145,12 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
                 self.screen.dismiss(None)
 
     class FilterResultsScreen(ModalScreen[list[str] | None]):
-        def __init__(self, root: str, paths: list[str]) -> None:
+        def __init__(self, root: str, entries: list[FilterEntry]) -> None:
             super().__init__()
             self.root = root
-            self.paths = paths
+            self.entries = entries
+            self.paths = [entry.path for entry in entries]
+            self.entries_by_path = {entry.path: entry for entry in entries}
             self.selected_paths: set[str] = set()
 
         def compose(self) -> ComposeResult:
@@ -163,11 +165,39 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
         def on_mount(self) -> None:
             table = self.query_one("#filter-results", DataTable)
             table.cursor_type = "row"
-            table.add_column("Selected", key="selected")
-            table.add_column("Path", key="path")
-            for path in self.paths:
-                table.add_row("[ ]", path, key=path)
+            table.add_column("Size", key="size")
+            table.add_column("Files", key="files")
+            table.add_column("Date", key="date")
+            table.add_column("Name", key="name")
+            for entry in self.entries:
+                table.add_row(*self._row_values(entry, selected=False), key=entry.path)
             table.focus()
+
+        def _row_values(self, entry: FilterEntry, selected: bool) -> tuple[str | Text, ...]:
+            if entry.size_bytes is None:
+                size = "unindexed"
+            else:
+                size = _human_bytes(entry.size_bytes)
+                if not entry.indexed:
+                    size = f">={size}"
+            if entry.file_count is None:
+                files = "-"
+            else:
+                files = str(entry.file_count)
+                if not entry.indexed:
+                    files = f">={files}"
+            date = (
+                time.strftime("%Y-%m-%d %H:%M", time.localtime(entry.mtime))
+                if entry.mtime
+                else "-"
+            )
+            name = str(Path(entry.path).relative_to(self.root))
+            if entry.is_dir:
+                name += "/"
+            values = (size, files, date, name)
+            if not selected:
+                return values
+            return tuple(Text(value, style="bold black on yellow") for value in values)
 
         def _current_result(self) -> str | None:
             table = self.query_one("#filter-results", DataTable)
@@ -177,10 +207,13 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
             return str(cell_key.row_key.value)
 
         def _update_result(self, path: str) -> None:
-            marker: str | Text = "[ ]"
-            if path in self.selected_paths:
-                marker = Text("[x]", style="bold black on yellow")
-            self.query_one("#filter-results", DataTable).update_cell(path, "selected", marker)
+            table = self.query_one("#filter-results", DataTable)
+            values = self._row_values(
+                self.entries_by_path[path],
+                selected=path in self.selected_paths,
+            )
+            for column, value in zip(("size", "files", "date", "name"), values):
+                table.update_cell(path, column, value)
 
         def _update_status(self) -> None:
             self.query_one("#filter-result-status", Static).update(
@@ -544,6 +577,7 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
                     keyword,
                     exclude,
                     result.paths,
+                    result.entries,
                     result.scanned_dirs,
                     result.elapsed_seconds,
                     result.indexed_matches,
@@ -557,6 +591,7 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
                     root,
                     keyword,
                     exclude,
+                    [],
                     [],
                     0,
                     0.0,
@@ -573,6 +608,7 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
                     keyword,
                     exclude,
                     [],
+                    [],
                     0,
                     0.0,
                     0,
@@ -588,6 +624,7 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
             keyword: str,
             exclude: str,
             paths: list[str],
+            entries: list[FilterEntry],
             scanned_dirs: int,
             elapsed: float,
             indexed_matches: int,
@@ -628,7 +665,7 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
                     return
                 self._start_delete(selected, permanent=True, trash=False)
 
-            self.push_screen(FilterResultsScreen(root, paths), after_results)
+            self.push_screen(FilterResultsScreen(root, entries), after_results)
 
         def action_sort_size(self) -> None:
             self.sort_by = "size"

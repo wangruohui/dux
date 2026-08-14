@@ -30,8 +30,20 @@ class IndexResult:
 
 
 @dataclass(slots=True)
+class FilterEntry:
+    path: str
+    name: str
+    is_dir: bool
+    indexed: bool
+    size_bytes: int | None
+    file_count: int | None
+    mtime: float
+
+
+@dataclass(slots=True)
 class FilterResult:
     paths: list[str]
+    entries: list[FilterEntry]
     scanned_dirs: int
     elapsed_seconds: float
     indexed_matches: int
@@ -103,7 +115,7 @@ class DuxService:
             filter_conn.close()
         if cancelled():
             raise FilterCancelled("filter cancelled")
-        indexed_candidates: list[tuple[str, bool]] = []
+        indexed_candidates: list[FilterEntry] = []
         for row in indexed_rows:
             if cancelled():
                 raise FilterCancelled("filter cancelled")
@@ -111,28 +123,39 @@ class DuxService:
             if exclude and exclude in os.path.relpath(candidate, root):
                 continue
             if fnmatch.fnmatchcase(str(row["name"]), keyword):
-                indexed_candidates.append((candidate, bool(row["is_dir"])))
+                indexed_candidates.append(
+                    FilterEntry(
+                        path=candidate,
+                        name=str(row["name"]),
+                        is_dir=bool(row["is_dir"]),
+                        indexed=bool(row["indexed"]),
+                        size_bytes=int(row["size_bytes"]),
+                        file_count=int(row["file_count"]),
+                        mtime=0.0,
+                    )
+                )
 
-        indexed_live: dict[str, bool] = {}
+        indexed_live: dict[str, FilterEntry] = {}
         stale_index_matches = 0
         matched_index_dirs: list[str] = []
-        for candidate, is_dir in sorted(
+        for entry in sorted(
             indexed_candidates,
-            key=lambda item: (len(Path(item[0]).parts), item[0]),
+            key=lambda item: (len(Path(item.path).parts), item.path),
         ):
             if cancelled():
                 raise FilterCancelled("filter cancelled")
+            candidate = entry.path
             if any(
                 candidate.startswith(matched_dir.rstrip("/") + "/")
                 for matched_dir in matched_index_dirs
             ):
                 continue
-            if is_dir:
+            if entry.is_dir:
                 matched_index_dirs.append(candidate)
             if not os.path.lexists(candidate):
                 stale_index_matches += 1
                 continue
-            indexed_live[candidate] = is_dir
+            indexed_live[candidate] = entry
 
         work: queue.Queue[str | None] = queue.Queue()
         work.put(root)
@@ -221,11 +244,41 @@ class DuxService:
             ):
                 continue
             final_paths.append(candidate)
-            if matches.get(candidate, indexed_live.get(candidate, False)):
+            indexed_entry = indexed_live.get(candidate)
+            if matches.get(candidate, bool(indexed_entry and indexed_entry.is_dir)):
                 matched_dirs.append(candidate)
-        final_path_set = set(final_paths)
+        sorted_paths = sorted(final_paths)
+        final_path_set = set(sorted_paths)
+        entries: list[FilterEntry] = []
+        for candidate in sorted_paths:
+            indexed_entry = indexed_live.get(candidate)
+            if indexed_entry is not None:
+                entries.append(
+                    FilterEntry(
+                        path=indexed_entry.path,
+                        name=indexed_entry.name,
+                        is_dir=indexed_entry.is_dir,
+                        indexed=indexed_entry.indexed,
+                        size_bytes=indexed_entry.size_bytes,
+                        file_count=indexed_entry.file_count,
+                        mtime=self._safe_mtime(candidate),
+                    )
+                )
+            else:
+                entries.append(
+                    FilterEntry(
+                        path=candidate,
+                        name=Path(candidate).name or candidate,
+                        is_dir=matches[candidate],
+                        indexed=False,
+                        size_bytes=None,
+                        file_count=None,
+                        mtime=self._safe_mtime(candidate),
+                    )
+                )
         return FilterResult(
-            paths=sorted(final_paths),
+            paths=sorted_paths,
+            entries=entries,
             scanned_dirs=scanned_dirs,
             elapsed_seconds=time.monotonic() - started_at,
             indexed_matches=len(final_path_set.intersection(indexed_live)),

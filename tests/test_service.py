@@ -442,6 +442,15 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(result.indexed_matches, 1)
         self.assertEqual(result.live_only_matches, 1)
         self.assertEqual(result.stale_index_matches, 1)
+        entries = {entry.path: entry for entry in result.entries}
+        self.assertTrue(entries[str(indexed)].indexed)
+        self.assertEqual(entries[str(indexed)].size_bytes, len(b"indexed"))
+        self.assertEqual(entries[str(indexed)].file_count, 1)
+        self.assertGreater(entries[str(indexed)].mtime, 0)
+        self.assertFalse(entries[str(live_only)].indexed)
+        self.assertIsNone(entries[str(live_only)].size_bytes)
+        self.assertIsNone(entries[str(live_only)].file_count)
+        self.assertGreater(entries[str(live_only)].mtime, 0)
 
     def test_filter_paths_can_cancel_during_scan(self) -> None:
         from dux.service import FilterCancelled

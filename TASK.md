@@ -62,3 +62,11 @@
 - DONE：`x` 可中断 SQLite 候选查询、现场递归和最终合并；取消后丢弃部分结果并恢复浏览状态。
 - DONE：filter 优先于删除任务响应 `x`；filter 退出后恢复取消最近删除任务的语义。
 - DONE：22 项 unittest、静态编译和 headless TUI 按键优先级冒烟全部通过。
+
+## Filter 结果信息列
+
+目标：filter 选择页面按普通浏览页面的口径显示大小、文件数和日期，并继续支持颜色选择与批量删除。
+
+- DONE：filter 结果携带批量索引元数据和现场 mtime，结果表改为 `Size / Files / Date / Name`。
+- DONE：选中项使用整行黄色，不增加选择列；递归结果名称显示相对 filter 根目录的路径。
+- DONE：indexed/live-only 元数据测试、22 项 unittest、静态编译和 headless TUI 表格冒烟全部通过。

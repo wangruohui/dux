@@ -322,7 +322,11 @@ def fetch_filter_candidates(
     if root_path == "/":
         return list(
             conn.execute(
-                "SELECT path, name, is_dir FROM nodes WHERE path != '/' AND name GLOB ?",
+                """
+                SELECT path, name, is_dir, indexed, size_bytes, file_count
+                FROM nodes
+                WHERE path != '/' AND name GLOB ?
+                """,
                 (name_pattern,),
             )
         )
@@ -331,7 +335,7 @@ def fetch_filter_candidates(
     return list(
         conn.execute(
             """
-            SELECT path, name, is_dir
+            SELECT path, name, is_dir, indexed, size_bytes, file_count
             FROM nodes
             WHERE path >= ? AND path < ? AND name GLOB ?
             """,
