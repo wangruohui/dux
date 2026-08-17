@@ -25,6 +25,10 @@ s size  c count  m date  n name  r refresh  f filter  x cancel active  q quit
 
 `dux` 解决清理空间前最常见的问题：哪里占空间、文件数有多少、最近是否变化、哪些内容可以安全清理。
 
+`dux ui` and `dux ls` open the index read-only, so they remain usable when the indexed filesystem or user quota is full. If SQLite cannot attach WAL/SHM read-only, the UI falls back to an immutable main-database snapshot and warns that uncheckpointed WAL data may be omitted. Refresh and deletion still use short-lived writer connections.
+
+`dux ui` 和 `dux ls` 以只读方式打开索引，因此索引所在文件系统或用户配额耗尽时仍可使用。如果 SQLite 无法只读挂载 WAL/SHM，UI 会退回 immutable 主库快照，并提示可能忽略尚未 checkpoint 的 WAL 数据；刷新和删除仍使用短生命周期写连接。
+
 ## Highlights / 亮点
 
 - **Multi-threaded indexing**: scans directory trees with worker threads and stores aggregate metadata in SQLite.

@@ -62,6 +62,33 @@ def connect(db_path: str | Path | None = None) -> sqlite3.Connection:
     return conn
 
 
+def connect_readonly(
+    db_path: str | Path | None = None,
+    *,
+    immutable: bool = False,
+) -> sqlite3.Connection:
+    path = Path(db_path or DEFAULT_DB_PATH).expanduser().resolve()
+    query = "mode=ro&immutable=1" if immutable else "mode=ro"
+    conn = sqlite3.connect(
+        f"{path.as_uri()}?{query}",
+        uri=True,
+        check_same_thread=False,
+        timeout=60.0,
+    )
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout=60000")
+        conn.execute("PRAGMA query_only=ON")
+        conn.execute("PRAGMA temp_store=MEMORY")
+        conn.execute("PRAGMA schema_version").fetchone()
+    except BaseException:
+        conn.close()
+        raise
+    with _CONNECTION_PATHS_LOCK:
+        _CONNECTION_PATHS[id(conn)] = path
+    return conn
+
+
 def connection_path(conn: sqlite3.Connection) -> Path:
     with _CONNECTION_PATHS_LOCK:
         return _CONNECTION_PATHS[id(conn)]

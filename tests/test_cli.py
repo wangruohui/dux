@@ -30,6 +30,7 @@ class CliTests(unittest.TestCase):
                 with patch("textual.app.App.run", lambda app, *args, **kwargs: apps.append(app)):
                     run_ui(str(db_path), str(root), 1)
                 self.assertEqual(len(apps), 1)
+                self.assertTrue(apps[0].service.read_only)
                 apps[0].service.close()
             finally:
                 service.conn.rollback()

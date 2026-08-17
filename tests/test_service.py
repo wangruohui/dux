@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 import tempfile
 import threading
 import time
 import unittest
 from pathlib import Path
 import sys
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from dux.service import DeleteCancelled, DuxService
@@ -39,6 +41,27 @@ class ServiceTests(unittest.TestCase):
         by_name = {row["name"]: row for row in rows}
         self.assertEqual(by_name["sub"]["size_bytes"], 20)
         self.assertEqual(by_name["sub"]["file_count"], 1)
+
+    def test_read_only_service_falls_back_to_immutable_snapshot(self) -> None:
+        (self.root / "item.bin").write_bytes(b"data")
+        self.service.index_path(str(self.root))
+        self.service.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        real_connect_readonly = db.connect_readonly
+
+        def fail_standard_readonly(path, *, immutable=False):
+            if not immutable:
+                raise sqlite3.OperationalError("database or disk is full")
+            return real_connect_readonly(path, immutable=True)
+
+        with patch("dux.service.db.connect_readonly", side_effect=fail_standard_readonly):
+            reader = DuxService(db_path=self.db_path, max_workers=1, read_only=True)
+        try:
+            self.assertTrue(reader.read_only)
+            self.assertTrue(reader.immutable_fallback)
+            self.assertIn("ignored_wal_bytes=", reader.readonly_warning)
+            self.assertIsNotNone(reader.get_node(str(self.root)))
+        finally:
+            reader.close()
 
     def test_writer_wait_reports_lock_owner(self) -> None:
         holder = DuxService(db_path=self.db_path, max_workers=1)

@@ -70,3 +70,12 @@
 - DONE：filter 结果携带批量索引元数据和现场 mtime，结果表改为 `Size / Files / Date / Name`。
 - DONE：选中项使用整行黄色，不增加选择列；递归结果名称显示相对 filter 根目录的路径。
 - DONE：indexed/live-only 元数据测试、22 项 unittest、静态编译和 headless TUI 表格冒烟全部通过。
+
+## 磁盘满时打开 UI
+
+目标：磁盘或用户配额耗尽时仍可打开 `dux ui` 查看索引并发起清理，不让 UI 启动产生数据库写入。
+
+- DONE：UI/`ls` 使用只读 SQLite；标准只读失败时退到 immutable 主库快照并提示 WAL 风险。
+- DONE：刷新使用独立写连接，删除连接失败会正常结束 job 并显示错误；应急删除成功后尝试恢复标准只读连接。
+- DONE：模拟 `database or disk is full` 的 immutable 回退和活动 writer 下 UI 启动均通过。
+- DONE：23 项 unittest、静态编译、diff 校验通过；真实 5.9 GiB 默认库 `dux ls` 前后 DB/WAL/SHM 大小与 mtime 不变。

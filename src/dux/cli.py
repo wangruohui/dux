@@ -54,8 +54,14 @@ def main(argv: list[str] | None = None) -> int:
         run_ui(args.db, args.path, args.workers)
         return 0
 
-    service = DuxService(db_path=args.db, max_workers=args.workers)
+    service = DuxService(
+        db_path=args.db,
+        max_workers=args.workers,
+        read_only=args.command == "ls",
+    )
     try:
+        if service.readonly_warning:
+            print(service.readonly_warning, file=sys.stderr, flush=True)
         if args.command == "index":
             def report_progress(count: int, path: str) -> None:
                 print(f"scanned_files={count} current={path}", file=sys.stderr, flush=True)

@@ -328,7 +328,7 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
 
         def __init__(self) -> None:
             super().__init__()
-            self.service = DuxService(db_path=db_path, max_workers=workers)
+            self.service = DuxService(db_path=db_path, max_workers=workers, read_only=True)
             self.current_path = self.service.canonical(path)
             self.sort_by = "size"
             self.reverse = True
@@ -371,6 +371,9 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
             table.cursor_type = "row"
             table.add_columns("Size", "Files", "Date", "Name", "Graph")
             self._reload_table()
+            if self.service.readonly_warning:
+                self._set_status(self.service.readonly_warning)
+                self.notify(self.service.readonly_warning, severity="warning")
 
         def _reload_table(self, focus_path: str | None = None) -> None:
             table = self.query_one(DataTable)
@@ -517,13 +520,31 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
             self.run_worker(self._refresh_current_worker, thread=True)
 
         def _refresh_current_worker(self) -> None:
-            self.service.index_path(
-                self.current_path,
-                lock_status=lambda owner: self.call_from_thread(
-                    self._set_status, f"Refresh waiting for database writer: {owner}"
-                ),
-            )
-            self.call_from_thread(self._reload_table)
+            refresh_service: DuxService | None = None
+            try:
+                refresh_service = DuxService(
+                    db_path=self.service.db_path,
+                    max_workers=self.service.max_workers,
+                )
+                refresh_service.index_path(
+                    self.current_path,
+                    lock_status=lambda owner: self.call_from_thread(
+                        self._set_status, f"Refresh waiting for database writer: {owner}"
+                    ),
+                )
+                self.call_from_thread(self._finish_refresh, None)
+            except Exception as exc:
+                self.call_from_thread(self._finish_refresh, exc)
+            finally:
+                if refresh_service is not None:
+                    refresh_service.close()
+
+        def _finish_refresh(self, error: Exception | None) -> None:
+            if error is not None:
+                self._set_status(f"Refresh failed: {error}")
+                self.notify(f"Refresh failed: {error}", severity="error")
+                return
+            self._reload_table()
 
         def action_filter_paths(self) -> None:
             if self.filter_active:
@@ -817,12 +838,13 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
             trash: bool,
         ) -> None:
             completed: list[str] = []
-            delete_service = DuxService(
-                db_path=self.service.db_path,
-                max_workers=self.service.max_workers,
-                delete_slots=self.delete_slots,
-            )
+            delete_service: DuxService | None = None
             try:
+                delete_service = DuxService(
+                    db_path=self.service.db_path,
+                    max_workers=self.service.max_workers,
+                    delete_slots=self.delete_slots,
+                )
                 action = "Moving" if trash else "Deleting"
                 target_workers = min(8, max(1, len(targets)))
                 unlink_workers = max(1, 256 // target_workers)
@@ -896,7 +918,8 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
             except Exception as exc:
                 self.call_from_thread(self._finish_delete, job_id, targets, completed, exc, False)
             finally:
-                delete_service.close()
+                if delete_service is not None:
+                    delete_service.close()
 
         def _delete_total(self, service: DuxService, target: str) -> int | None:
             row = service.get_node(target)
@@ -933,6 +956,18 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
             else:
                 outcome = f"Delete job {job_id} finished: {len(completed)} item(s)"
                 self.notify(outcome)
+            if completed and self.service.immutable_fallback:
+                replacement = DuxService(
+                    db_path=self.service.db_path,
+                    max_workers=self.service.max_workers,
+                    read_only=True,
+                )
+                if not replacement.immutable_fallback:
+                    previous = self.service
+                    self.service = replacement
+                    previous.close()
+                else:
+                    replacement.close()
             if remaining_jobs:
                 self._render_delete_status()
             else:

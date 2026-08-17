@@ -67,9 +67,26 @@ class DuxService:
         db_path: str | Path | None = None,
         max_workers: int = 256,
         delete_slots: threading.BoundedSemaphore | None = None,
+        read_only: bool = False,
     ) -> None:
         self.db_path = Path(db_path or db.DEFAULT_DB_PATH).expanduser()
-        self.conn = db.connect(self.db_path)
+        self.read_only = read_only
+        self.immutable_fallback = False
+        self.readonly_warning: str | None = None
+        if read_only:
+            try:
+                self.conn = db.connect_readonly(self.db_path)
+            except sqlite3.OperationalError as exc:
+                self.conn = db.connect_readonly(self.db_path, immutable=True)
+                self.immutable_fallback = True
+                wal_path = Path(f"{self.db_path}-wal")
+                wal_bytes = wal_path.stat().st_size if wal_path.exists() else 0
+                self.readonly_warning = (
+                    "Emergency immutable database snapshot: SQLite read-only WAL access failed "
+                    f"({exc}); ignored_wal_bytes={wal_bytes}."
+                )
+        else:
+            self.conn = db.connect(self.db_path)
         self.max_workers = max_workers
         self.delete_slots = delete_slots or threading.BoundedSemaphore(256)
 
@@ -102,7 +119,10 @@ class DuxService:
             raise FilterCancelled("filter cancelled")
 
         started_at = time.monotonic()
-        filter_conn = db.connect(self.db_path)
+        filter_conn = db.connect_readonly(
+            self.db_path,
+            immutable=self.immutable_fallback,
+        )
         filter_conn.set_progress_handler(lambda: int(cancelled()), 1000)
         try:
             try:
