@@ -17,7 +17,7 @@ Path: /data/project                         Sort: size
 │   9.7G   │    14,006 │ 2026-06-22 │ tmp/                         │ [                ] │
 └──────────┴───────────┴────────────┴──────────────────────────────┴────────────────────┘
 
-Enter open  Backspace parent  Space select  Del/Shift+Del delete
+Enter open  Up parent  Backspace history  Space select  Del/Shift+Del delete
 s size  c count  m date  n name  r refresh  f filter  x cancel active  q quit
 ```
 
@@ -25,9 +25,9 @@ s size  c count  m date  n name  r refresh  f filter  x cancel active  q quit
 
 `dux` 解决清理空间前最常见的问题：哪里占空间、文件数有多少、最近是否变化、哪些内容可以安全清理。
 
-`dux ui` and `dux ls` open the index read-only, so they remain usable when the indexed filesystem or user quota is full. If SQLite cannot attach WAL/SHM read-only, the UI falls back to an immutable main-database snapshot and warns that uncheckpointed WAL data may be omitted. Refresh and deletion still use short-lived writer connections.
+`dux ui` and `dux ls` open the index read-only, so they remain usable when the indexed filesystem or user quota is full. If SQLite cannot attach WAL/SHM read-only, the UI falls back to an immutable main-database snapshot and warns that uncheckpointed WAL data may be omitted. If a permanent delete cannot open a writer because storage is full, it frees filesystem space first and then synchronizes the deleted index subtree.
 
-`dux ui` 和 `dux ls` 以只读方式打开索引，因此索引所在文件系统或用户配额耗尽时仍可使用。如果 SQLite 无法只读挂载 WAL/SHM，UI 会退回 immutable 主库快照，并提示可能忽略尚未 checkpoint 的 WAL 数据；刷新和删除仍使用短生命周期写连接。
+`dux ui` 和 `dux ls` 以只读方式打开索引，因此索引所在文件系统或用户配额耗尽时仍可使用。如果 SQLite 无法只读挂载 WAL/SHM，UI 会退回 immutable 主库快照，并提示可能忽略尚未 checkpoint 的 WAL 数据；永久删除若因空间耗尽无法建立写连接，会先释放文件空间，再同步已删除的索引子树。
 
 ## Highlights / 亮点
 
@@ -133,14 +133,16 @@ dux --workers 16 index /data/project
 
 - `Enter` / `Right`: open selected directory.
 - `Enter` / `Right`：进入当前目录。
-- `Backspace` / `Left`: go to parent directory.
-- `Backspace` / `Left`：返回父目录。
+- `Up`: go to the current directory's parent.
+- `Up`：进入当前目录的父目录。
+- `Backspace`: return to the previously visited directory using navigation history.
+- `Backspace`：按访问历史返回上一个目录。
 - `Space`: select or unselect the current row; selected rows are highlighted and prefixed with `[x]`. Selections are scoped to the current directory page and are cleared when entering a child or returning to the parent.
 - `Space`：选择或取消选择当前行；选中行会高亮并显示 `[x]`。选择仅限当前目录页面，进入子目录或返回父目录时会清空。
 - `Delete` / `Shift+Delete`: delete marked rows visible on the current page; otherwise delete the current row. Hidden selections from another directory are never included. Files within a directory and multiple delete jobs run concurrently while sharing a global concurrency limit of 256. Press `y` to confirm, `n` or `Esc` to cancel.
 - `Delete` / `Shift+Delete`：只删除当前页面中可见的已选行；否则删除当前光标行，其他目录中的隐藏选择绝不会被带入。目录内部文件和多个删除任务都会并行删除，并共享全局 256 并发限制。按 `y` 确认，按 `n` 或 `Esc` 取消。
-- `r`: refresh the current subtree.
-- `r`：刷新当前子树。
+- `r`: refresh the current subtree in the background. Scanning uses a staging database and the completed subtree is merged in one short transaction.
+- `r`：在后台刷新当前子树；扫描写入 staging 数据库，完成后用一个短事务合并。
 - `f`: recursively find file/directory basenames using shell globs such as `a*`, with optional exclude-path pruning; it remains available while deletion runs.
 - `f`：在当前目录下递归使用 `a*` 等 shell 通配符匹配文件或目录 basename，可填写 exclude 关键字剪枝；删除期间仍可使用。
 - `x`: cancel the most recently started job that has not already received a cancellation request. Press repeatedly to cancel the remaining jobs one by one. Completed filesystem deletions are flushed to SQLite before each cancellation finishes.

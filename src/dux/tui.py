@@ -4,6 +4,7 @@ import threading
 import time
 from pathlib import Path
 
+from . import db
 from .service import DeleteCancelled, DuxService, FilterCancelled, FilterEntry
 
 
@@ -64,13 +65,13 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
                 self.app.action_open_selected()
             elif event.key == "backspace":
                 event.stop()
+                self.app.action_go_back()
+            elif event.key == "up":
+                event.stop()
                 self.app.action_go_parent()
             elif event.key == "right":
                 event.stop()
                 self.app.action_open_selected()
-            elif event.key == "left":
-                event.stop()
-                self.app.action_go_parent()
             elif event.key == "space":
                 event.stop()
                 self.app.action_toggle_select()
@@ -313,7 +314,8 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
             Binding("q", "request_quit", "Quit"),
             Binding("ctrl+c", "request_quit", "Quit"),
             Binding("enter", "open_selected", "Open"),
-            Binding("backspace", "go_parent", "Up"),
+            Binding("backspace", "go_back", "Back"),
+            Binding("up", "go_parent", "Parent"),
             Binding("r", "refresh_current", "Refresh"),
             Binding("f", "filter_paths", "Filter"),
             Binding("x", "cancel_delete", "Cancel Active"),
@@ -330,6 +332,7 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
             super().__init__()
             self.service = DuxService(db_path=db_path, max_workers=workers, read_only=True)
             self.current_path = self.service.canonical(path)
+            self.navigation_stack: list[str] = []
             self.sort_by = "size"
             self.reverse = True
             self.rows_by_key: dict[str, bool] = {}
@@ -342,6 +345,8 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
             self.delete_jobs_lock = threading.Lock()
             self.filter_active = False
             self.filter_cancel_event: threading.Event | None = None
+            self.refresh_active = False
+            self.refresh_path: str | None = None
 
         @property
         def delete_active(self) -> bool:
@@ -359,6 +364,9 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
                 return
             if self.filter_active:
                 self.notify("Filter is still running; wait for it to finish before quitting.", severity="warning")
+                return
+            if self.refresh_active:
+                self.notify("Refresh is still running; wait for it to finish before quitting.", severity="warning")
                 return
             self.service.close()
             self.exit()
@@ -504,47 +512,98 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
             if not selected:
                 return
             if self.rows_by_key.get(selected):
-                self.marked_paths.clear()
-                self.current_path = selected
-                self._reload_table()
+                self._navigate_to(selected)
+
+        def _navigate_to(self, destination: str, *, remember: bool = True) -> None:
+            destination = self.service.canonical(destination)
+            if destination == self.current_path:
+                return
+            previous = self.current_path
+            if remember:
+                self.navigation_stack.append(previous)
+            self.marked_paths.clear()
+            self.current_path = destination
+            focus_path = previous if str(Path(previous).parent) == destination else None
+            self._reload_table(focus_path=focus_path)
 
         def action_go_parent(self) -> None:
             parent = str(Path(self.current_path).parent)
             if parent != self.current_path:
-                self.marked_paths.clear()
-                self.current_path = parent
-                self._reload_table()
+                self._navigate_to(parent)
+
+        def action_go_back(self) -> None:
+            if not self.navigation_stack:
+                self.notify("No previous directory.", severity="warning")
+                return
+            self._navigate_to(self.navigation_stack.pop(), remember=False)
 
         def action_refresh_current(self) -> None:
-            self.notify(f"Refreshing {self.current_path}")
-            self.run_worker(self._refresh_current_worker, thread=True)
+            if self.refresh_active:
+                self.notify(f"Refresh already running: {self.refresh_path}", severity="warning")
+                return
+            refresh_path = self.current_path
+            self.refresh_active = True
+            self.refresh_path = refresh_path
+            self._set_status(f"Background refresh started: {refresh_path}")
+            self.notify(f"Refreshing {refresh_path} in the background")
+            self.run_worker(lambda: self._refresh_current_worker(refresh_path), thread=True)
 
-        def _refresh_current_worker(self) -> None:
+        def _refresh_current_worker(self, refresh_path: str) -> None:
             refresh_service: DuxService | None = None
+            started_at = time.monotonic()
             try:
                 refresh_service = DuxService(
                     db_path=self.service.db_path,
                     max_workers=self.service.max_workers,
                 )
                 refresh_service.index_path(
-                    self.current_path,
+                    refresh_path,
+                    progress=lambda count, current: self.call_from_thread(
+                        self._set_status,
+                        f"Refreshing {refresh_path}: {count} entries "
+                        f"({count / max(time.monotonic() - started_at, 0.001):.0f}/s) current={current}",
+                    ),
                     lock_status=lambda owner: self.call_from_thread(
                         self._set_status, f"Refresh waiting for database writer: {owner}"
                     ),
                 )
-                self.call_from_thread(self._finish_refresh, None)
+                self.call_from_thread(self._finish_refresh, refresh_path, None)
             except Exception as exc:
-                self.call_from_thread(self._finish_refresh, exc)
+                self.call_from_thread(self._finish_refresh, refresh_path, exc)
             finally:
                 if refresh_service is not None:
                     refresh_service.close()
 
-        def _finish_refresh(self, error: Exception | None) -> None:
+        def _finish_refresh(self, refresh_path: str, error: Exception | None) -> None:
+            self.refresh_active = False
+            self.refresh_path = None
             if error is not None:
                 self._set_status(f"Refresh failed: {error}")
                 self.notify(f"Refresh failed: {error}", severity="error")
                 return
-            self._reload_table()
+            self._reopen_read_service_after_write()
+            if self.current_path == refresh_path:
+                self._reload_table()
+            self._set_status(f"Background refresh finished: {refresh_path}")
+            self.notify(f"Refresh finished: {refresh_path}")
+
+        def _reopen_read_service_after_write(self) -> None:
+            if not self.service.immutable_fallback:
+                return
+            try:
+                replacement = DuxService(
+                    db_path=self.service.db_path,
+                    max_workers=self.service.max_workers,
+                    read_only=True,
+                )
+            except Exception:
+                return
+            if replacement.immutable_fallback:
+                replacement.close()
+                return
+            previous = self.service
+            self.service = replacement
+            previous.close()
 
         def action_filter_paths(self) -> None:
             if self.filter_active:
@@ -840,11 +899,6 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
             completed: list[str] = []
             delete_service: DuxService | None = None
             try:
-                delete_service = DuxService(
-                    db_path=self.service.db_path,
-                    max_workers=self.service.max_workers,
-                    delete_slots=self.delete_slots,
-                )
                 action = "Moving" if trash else "Deleting"
                 target_workers = min(8, max(1, len(targets)))
                 unlink_workers = max(1, 256 // target_workers)
@@ -853,7 +907,7 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
                     job_id,
                     f"{action} {len(targets)} item(s), concurrency=256",
                 )
-                totals = {target: self._delete_total(delete_service, target) for target in targets}
+                totals = {target: self._delete_total(self.service, target) for target in targets}
                 started_at = time.monotonic()
                 latest_counts = {target: 0 for target in targets}
                 progress_lock = threading.Lock()
@@ -888,10 +942,63 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
                         self.call_from_thread(
                             self._show_delete_job_status, job_id, f"Flushing index updates: {target}"
                         )
+                    elif phase == "syncing-index-after-delete":
+                        self.call_from_thread(
+                            self._show_delete_job_status,
+                            job_id,
+                            f"Files deleted; synchronizing index: {target}",
+                        )
+                    elif phase.startswith("index-sync-deferred:"):
+                        reason = phase.removeprefix("index-sync-deferred:")
+                        self.call_from_thread(
+                            self._show_delete_job_status,
+                            job_id,
+                            f"Files deleted; index refresh required: {reason}",
+                        )
                     elif phase == "index-synced":
                         self.call_from_thread(
                             self._show_delete_job_status, job_id, f"Index synchronized: {target}"
                         )
+
+                filesystem_first = self.service.immutable_fallback
+                if not filesystem_first:
+                    try:
+                        delete_service = DuxService(
+                            db_path=self.service.db_path,
+                            max_workers=self.service.max_workers,
+                            delete_slots=self.delete_slots,
+                        )
+                    except Exception as exc:
+                        if not permanent or not db.is_storage_full_error(exc):
+                            raise
+                        filesystem_first = True
+
+                if filesystem_first:
+                    self.call_from_thread(
+                        self._show_delete_job_status,
+                        job_id,
+                        "Database storage is full; deleting files before index synchronization",
+                    )
+                    result = self.service.delete_paths_filesystem_first(
+                        targets,
+                        progress=progress,
+                        status=status,
+                        progress_interval=1000,
+                        workers=target_workers,
+                        unlink_workers=unlink_workers,
+                        cancel_event=cancel_event,
+                    )
+                    completed = result.completed_targets
+                    self.call_from_thread(
+                        self._finish_delete,
+                        job_id,
+                        targets,
+                        completed,
+                        result.error,
+                        result.cancelled and result.error is None,
+                        result.index_synchronized,
+                    )
+                    return
 
                 delete_service.delete_paths(
                     targets,
@@ -905,7 +1012,9 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
                     cancel_event=cancel_event,
                 )
                 completed = targets
-                self.call_from_thread(self._finish_delete, job_id, targets, completed, None, False)
+                self.call_from_thread(
+                    self._finish_delete, job_id, targets, completed, None, False, True
+                )
             except DeleteCancelled as exc:
                 self.call_from_thread(
                     self._finish_delete,
@@ -914,9 +1023,12 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
                     exc.completed_targets,
                     None,
                     True,
+                    True,
                 )
             except Exception as exc:
-                self.call_from_thread(self._finish_delete, job_id, targets, completed, exc, False)
+                self.call_from_thread(
+                    self._finish_delete, job_id, targets, completed, exc, False, True
+                )
             finally:
                 if delete_service is not None:
                     delete_service.close()
@@ -934,6 +1046,7 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
             completed: list[str],
             error: Exception | None,
             cancelled: bool,
+            index_synchronized: bool,
         ) -> None:
             with self.delete_jobs_lock:
                 self.delete_jobs.pop(job_id, None)
@@ -948,26 +1061,25 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
                 if not any(path == target or path.startswith(target.rstrip("/") + "/") for target in completed)
             }
             if cancelled:
-                outcome = f"Delete job {job_id} cancelled; index synchronized."
-                self.notify(outcome)
+                suffix = "index synchronized" if index_synchronized else "index refresh required"
+                outcome = f"Delete job {job_id} cancelled; {suffix}."
+                self.notify(outcome, severity="warning" if not index_synchronized else "information")
             elif error is not None:
-                outcome = f"Delete job {job_id} failed: {error}"
-                self.notify(outcome, severity="error")
-            else:
-                outcome = f"Delete job {job_id} finished: {len(completed)} item(s)"
-                self.notify(outcome)
-            if completed and self.service.immutable_fallback:
-                replacement = DuxService(
-                    db_path=self.service.db_path,
-                    max_workers=self.service.max_workers,
-                    read_only=True,
-                )
-                if not replacement.immutable_fallback:
-                    previous = self.service
-                    self.service = replacement
-                    previous.close()
+                if completed and not index_synchronized:
+                    outcome = (
+                        f"Delete job {job_id} removed {len(completed)} item(s), "
+                        f"but index refresh is required: {error}"
+                    )
+                    self.notify(outcome, severity="warning")
                 else:
-                    replacement.close()
+                    outcome = f"Delete job {job_id} failed: {error}"
+                    self.notify(outcome, severity="error")
+            else:
+                suffix = "" if index_synchronized else "; index refresh required"
+                outcome = f"Delete job {job_id} finished: {len(completed)} item(s){suffix}"
+                self.notify(outcome, severity="warning" if not index_synchronized else "information")
+            if completed:
+                self._reopen_read_service_after_write()
             if remaining_jobs:
                 self._render_delete_status()
             else:

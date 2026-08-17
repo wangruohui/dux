@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import fcntl
 import json
 import os
@@ -19,6 +20,25 @@ DEFAULT_DB_PATH = Path("~/.cache/dux/dux.db").expanduser()
 LOCK_REPORT_INTERVAL = 1.0
 _CONNECTION_PATHS: dict[int, Path] = {}
 _CONNECTION_PATHS_LOCK = threading.Lock()
+
+
+def is_storage_full_error(error: BaseException) -> bool:
+    current: BaseException | None = error
+    while current is not None:
+        if isinstance(current, OSError) and current.errno in {errno.ENOSPC, errno.EDQUOT}:
+            return True
+        if isinstance(current, sqlite3.Error):
+            code = getattr(current, "sqlite_errorcode", None)
+            if code is not None and code & 0xFF == sqlite3.SQLITE_FULL:
+                return True
+        message = str(current).lower()
+        if any(
+            text in message
+            for text in ("database or disk is full", "no space left on device", "disk quota exceeded")
+        ):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
 
 
 SCHEMA = """

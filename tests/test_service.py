@@ -63,6 +63,59 @@ class ServiceTests(unittest.TestCase):
         finally:
             reader.close()
 
+    def test_filesystem_first_delete_syncs_index_after_removal(self) -> None:
+        target = self.root / "free-space"
+        target.mkdir()
+        (target / "item.bin").write_bytes(b"data")
+        self.service.index_path(str(self.root))
+        reader = DuxService(db_path=self.db_path, max_workers=2, read_only=True)
+        try:
+            result = reader.delete_paths_filesystem_first(
+                [str(target)],
+                workers=1,
+                unlink_workers=2,
+            )
+        finally:
+            reader.close()
+
+        self.assertFalse(target.exists())
+        self.assertEqual(result.completed_targets, [str(target)])
+        self.assertTrue(result.index_synchronized)
+        self.assertIsNone(result.error)
+        self.assertIsNone(self.service.get_node(str(target)))
+        root = self.service.get_node(str(self.root))
+        self.assertEqual(int(root["size_bytes"]), 0)
+        self.assertEqual(int(root["file_count"]), 0)
+
+    def test_filesystem_first_delete_keeps_result_when_index_still_cannot_write(self) -> None:
+        target = self.root / "free-space"
+        target.mkdir()
+        (target / "item.bin").write_bytes(b"data")
+        self.service.index_path(str(self.root))
+        reader = DuxService(db_path=self.db_path, max_workers=2, read_only=True)
+        try:
+            with patch(
+                "dux.service.db.connect",
+                side_effect=sqlite3.OperationalError("database or disk is full"),
+            ):
+                result = reader.delete_paths_filesystem_first(
+                    [str(target)],
+                    workers=1,
+                    unlink_workers=2,
+                )
+        finally:
+            reader.close()
+
+        self.assertFalse(target.exists())
+        self.assertEqual(result.completed_targets, [str(target)])
+        self.assertFalse(result.index_synchronized)
+        self.assertIn("database or disk is full", str(result.error))
+        self.assertIsNotNone(self.service.get_node(str(target)))
+
+    def test_storage_full_error_detection(self) -> None:
+        self.assertTrue(db.is_storage_full_error(sqlite3.OperationalError("database or disk is full")))
+        self.assertFalse(db.is_storage_full_error(sqlite3.OperationalError("database is locked")))
+
     def test_writer_wait_reports_lock_owner(self) -> None:
         holder = DuxService(db_path=self.db_path, max_workers=1)
         waiter = DuxService(db_path=self.db_path, max_workers=1)

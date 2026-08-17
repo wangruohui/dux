@@ -51,6 +51,14 @@ class FilterResult:
     stale_index_matches: int
 
 
+@dataclass(slots=True)
+class FilesystemDeleteResult:
+    completed_targets: list[str]
+    cancelled: bool
+    index_synchronized: bool
+    error: BaseException | None = None
+
+
 class DeleteCancelled(RuntimeError):
     def __init__(self, completed_targets: list[str]) -> None:
         super().__init__("delete cancelled after synchronizing the index")
@@ -578,6 +586,97 @@ class DuxService:
         if was_cancelled:
             raise DeleteCancelled(completed_targets)
         return destinations
+
+    def delete_paths_filesystem_first(
+        self,
+        paths: list[str],
+        *,
+        progress: Callable[[str, int, str], None] | None = None,
+        status: Callable[[str, str], None] | None = None,
+        progress_interval: int = 1000,
+        workers: int = 2,
+        unlink_workers: int = 8,
+        cancel_event: threading.Event | None = None,
+    ) -> FilesystemDeleteResult:
+        """Free filesystem space before opening the database for index updates."""
+        operation_cancel = cancel_event or threading.Event()
+        targets: list[tuple[str, bool]] = []
+        for path in paths:
+            target = self.canonical(path)
+            indexed = db.fetch_node(self.conn, target) is not None
+            if not indexed and not Path(target).exists():
+                raise FileNotFoundError(target)
+            targets.append((target, indexed))
+
+        def remove_target(target: str) -> bool:
+            def report(count: int, current_path: str) -> None:
+                if progress is not None:
+                    progress(target, count, current_path)
+
+            return self._remove_from_fs(
+                target,
+                progress=report,
+                progress_interval=progress_interval,
+                unlink_workers=unlink_workers,
+                cancel_event=operation_cancel,
+            )
+
+        completed_targets: list[str] = []
+        errors: list[BaseException] = []
+        with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+            futures = {pool.submit(remove_target, target): target for target, _indexed in targets}
+            for future in as_completed(futures):
+                target = futures[future]
+                try:
+                    completed = future.result()
+                except BaseException as exc:
+                    operation_cancel.set()
+                    errors.append(exc)
+                    continue
+                if completed:
+                    completed_targets.append(target)
+
+        indexed_targets = dict(targets)
+        incomplete_indexed = any(
+            indexed and target not in completed_targets for target, indexed in targets
+        )
+        sync_error: BaseException | None = None
+        indexed_completed = [target for target in completed_targets if indexed_targets[target]]
+        if indexed_completed:
+            sync_service: DuxService | None = None
+            try:
+                if status is not None:
+                    status(indexed_completed[0], "syncing-index-after-delete")
+                sync_service = DuxService(
+                    db_path=self.db_path,
+                    max_workers=self.max_workers,
+                    delete_slots=self.delete_slots,
+                )
+                for target in indexed_completed:
+                    sync_service._delete_subtree_from_index(
+                        target,
+                        lock_status=(
+                            None
+                            if status is None
+                            else lambda owner, target=target: status(target, f"waiting-lock:{owner}")
+                        ),
+                    )
+                    if status is not None:
+                        status(target, "index-synced")
+            except BaseException as exc:
+                sync_error = exc
+                if status is not None:
+                    status(indexed_completed[0], f"index-sync-deferred:{exc}")
+            finally:
+                if sync_service is not None:
+                    sync_service.close()
+
+        return FilesystemDeleteResult(
+            completed_targets=completed_targets,
+            cancelled=operation_cancel.is_set() and len(completed_targets) < len(targets),
+            index_synchronized=not incomplete_indexed and sync_error is None,
+            error=errors[0] if errors else sync_error,
+        )
 
     def list_children(self, path: str, sort_by: str = "size", reverse: bool = True) -> list[sqlite3.Row]:
         root = self.canonical(path)
