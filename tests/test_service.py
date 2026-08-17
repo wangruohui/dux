@@ -304,7 +304,7 @@ class ServiceTests(unittest.TestCase):
         self.assertTrue(by_name["sibling"]["live_only"])
         self.assertIsNone(by_name["sibling"]["size_bytes"])
 
-    def test_visible_children_sort_descending_with_unindexed_last(self) -> None:
+    def test_visible_children_sort_both_directions_with_unindexed_last(self) -> None:
         alpha = self.root / "alpha"
         beta = self.root / "beta"
         zulu = self.root / "zulu"
@@ -325,6 +325,10 @@ class ServiceTests(unittest.TestCase):
                 str(self.root), sort_by=sort_by, reverse=True, live_limit=10
             )
             self.assertEqual([row["name"] for row in rows], ["beta", "alpha", "zulu"])
+            rows, _ = self.service.list_visible_children(
+                str(self.root), sort_by=sort_by, reverse=False, live_limit=10
+            )
+            self.assertEqual([row["name"] for row in rows], ["alpha", "beta", "zulu"])
 
     def test_delete_unindexed_live_path(self) -> None:
         sub = self.root / "sub"

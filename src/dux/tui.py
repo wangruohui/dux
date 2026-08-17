@@ -156,6 +156,8 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
             self.entries_by_path = {entry.path: entry for entry in entries}
             self.selected_paths: set[str] = set()
             self.sort_by = "size"
+            self.reverse = True
+            self.last_sort_key: str | None = None
 
         def compose(self) -> ComposeResult:
             yield Container(
@@ -180,17 +182,24 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
             table.focus()
 
         def _sorted_entries(self) -> list[FilterEntry]:
-            def key(entry: FilterEntry) -> tuple[int, float, str]:
+            def value(entry: FilterEntry) -> int | float | None:
                 if self.sort_by == "count":
-                    value = entry.file_count
-                elif self.sort_by == "mtime":
-                    value = entry.mtime
-                else:
-                    value = entry.size_bytes
-                unindexed = not entry.indexed or value is None
-                return (int(unindexed), -float(value or 0), entry.path)
+                    return entry.file_count
+                if self.sort_by == "mtime":
+                    return entry.mtime
+                return entry.size_bytes
 
-            return sorted(self.entries, key=key)
+            indexed: list[FilterEntry] = []
+            unindexed: list[FilterEntry] = []
+            for entry in self.entries:
+                target = indexed if entry.indexed and value(entry) is not None else unindexed
+                target.append(entry)
+            indexed.sort(
+                key=lambda entry: (float(value(entry) or 0), entry.path),
+                reverse=self.reverse,
+            )
+            unindexed.sort(key=lambda entry: entry.path)
+            return indexed + unindexed
 
         def _render_results(self, focus_path: str | None = None) -> None:
             table = self.query_one("#filter-results", DataTable)
@@ -249,14 +258,20 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
 
         def _update_status(self) -> None:
             sort_name = {"size": "size", "count": "files", "mtime": "date"}[self.sort_by]
+            direction = "descending" if self.reverse else "ascending"
             self.query_one("#filter-result-status", Static).update(
                 f"{len(self.selected_paths)}/{len(self.paths)} selected | "
-                f"sort={sort_name} descending | unindexed last"
+                f"sort={sort_name} {direction} | unindexed last"
             )
 
         def action_sort_results(self, sort_by: str) -> None:
             focus_path = self._current_result()
+            if self.last_sort_key == sort_by:
+                self.reverse = not self.reverse
+            else:
+                self.reverse = True
             self.sort_by = sort_by
+            self.last_sort_key = sort_by
             self._render_results(focus_path=focus_path)
 
         def action_toggle_result(self) -> None:
@@ -375,6 +390,7 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
             self.navigation_forward_stack: list[str] = []
             self.sort_by = "size"
             self.reverse = True
+            self.last_sort_key: str | None = None
             self.rows_by_key: dict[str, bool] = {}
             self.marked_paths: set[str] = set()
             self.delete_slots = threading.BoundedSemaphore(256)
@@ -799,21 +815,25 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
             self.push_screen(FilterResultsScreen(root, entries), after_results)
 
         def action_sort_size(self) -> None:
-            self.sort_by = "size"
-            self._reload_table()
+            self._apply_sort("size")
 
         def action_sort_count(self) -> None:
-            self.sort_by = "count"
-            self._reload_table()
+            self._apply_sort("count")
 
         def action_sort_mtime(self) -> None:
-            self.sort_by = "mtime"
+            self._apply_sort("mtime")
+
+        def _apply_sort(self, sort_by: str) -> None:
+            if self.last_sort_key == sort_by:
+                self.reverse = not self.reverse
+            else:
+                self.reverse = True
+            self.sort_by = sort_by
+            self.last_sort_key = sort_by
             self._reload_table()
 
         def action_sort_name(self) -> None:
-            self.sort_by = "name"
-            self.reverse = True
-            self._reload_table()
+            self._apply_sort("name")
 
         def action_delete_requested(self) -> None:
             targets = self._marked_delete_roots()

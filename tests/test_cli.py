@@ -73,6 +73,19 @@ class CliTests(unittest.TestCase):
                 self.assertIn(("alt+right", "go_forward"), bindings)
                 self.assertNotIn(("up", "go_parent"), bindings)
 
+                app.action_sort_size()
+                self.assertTrue(app.reverse)
+                app.action_sort_size()
+                self.assertFalse(app.reverse)
+                app.action_sort_count()
+                self.assertTrue(app.reverse)
+                app.action_sort_count()
+                self.assertFalse(app.reverse)
+                app.action_sort_mtime()
+                self.assertTrue(app.reverse)
+                app.action_sort_mtime()
+                self.assertFalse(app.reverse)
+
                 queued = []
                 refreshed = []
                 app.run_worker = lambda worker, **kwargs: queued.append(worker)
@@ -219,15 +232,30 @@ class CliTests(unittest.TestCase):
                             [entries[1].path, entries[2].path, entries[0].path, entries[3].path],
                         )
                         self.assertEqual(screen.selected_paths, {entries[0].path})
+                        await pilot.press("c")
+                        self.assertEqual(
+                            row_order(),
+                            [entries[0].path, entries[2].path, entries[1].path, entries[3].path],
+                        )
                         await pilot.press("m")
                         self.assertEqual(
                             row_order(),
                             [entries[2].path, entries[1].path, entries[0].path, entries[3].path],
                         )
+                        await pilot.press("m")
+                        self.assertEqual(
+                            row_order(),
+                            [entries[0].path, entries[1].path, entries[2].path, entries[3].path],
+                        )
                         await pilot.press("s")
                         self.assertEqual(
                             row_order(),
                             [entries[0].path, entries[1].path, entries[2].path, entries[3].path],
+                        )
+                        await pilot.press("s")
+                        self.assertEqual(
+                            row_order(),
+                            [entries[2].path, entries[1].path, entries[0].path, entries[3].path],
                         )
                         self.assertIn("width: 94%", app.CSS)
 
