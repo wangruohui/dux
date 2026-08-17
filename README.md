@@ -17,7 +17,7 @@ Path: /data/project                         Sort: size
 │   9.7G   │    14,006 │ 2026-06-22 │ tmp/                         │ [                ] │
 └──────────┴───────────┴────────────┴──────────────────────────────┴────────────────────┘
 
-Enter open  Up parent  Backspace history  Space select  Del/Shift+Del delete
+Enter open  Backspace parent  Alt+Left/Right history  Space select  Del/Shift+Del delete
 s size  c count  m date  n name  r refresh  f filter  x cancel active  q quit
 ```
 
@@ -133,10 +133,12 @@ dux --workers 16 index /data/project
 
 - `Enter` / `Right`: open selected directory.
 - `Enter` / `Right`：进入当前目录。
-- `Up`: go to the current directory's parent.
-- `Up`：进入当前目录的父目录。
-- `Backspace`: return to the previously visited directory using navigation history.
-- `Backspace`：按访问历史返回上一个目录。
+- `Up` / `Down`: move the row cursor.
+- `Up` / `Down`：移动表格行光标。
+- `Backspace`: go to the current directory's parent.
+- `Backspace`：进入当前目录的父目录。
+- `Alt+Left` / `Alt+Right`: navigate backward or forward through directory history.
+- `Alt+Left` / `Alt+Right`：按目录访问历史后退或前进。
 - `Space`: select or unselect the current row; selected rows are highlighted and prefixed with `[x]`. Selections are scoped to the current directory page and are cleared when entering a child or returning to the parent.
 - `Space`：选择或取消选择当前行；选中行会高亮并显示 `[x]`。选择仅限当前目录页面，进入子目录或返回父目录时会清空。
 - `Delete` / `Shift+Delete`: delete marked rows visible on the current page; otherwise delete the current row. Hidden selections from another directory are never included. Files within a directory and multiple delete jobs run concurrently while sharing a global concurrency limit of 256. Press `y` to confirm, `n` or `Esc` to cancel.

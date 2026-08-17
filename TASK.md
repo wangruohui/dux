@@ -93,3 +93,10 @@
 
 - DONE：维护访问栈并调整按键绑定，刷新期间保持浏览可用并展示扫描进度。
 - DONE：29 项 unittest、静态编译、diff 检查和 headless TUI 按键验证全部通过。
+
+## 浏览历史快捷键
+
+目标：`Alt+Left` / `Alt+Right` 按访问历史后退和前进；`Backspace` 进入父目录；`Up` 恢复表格行光标移动。
+
+- DONE：把单历史栈改为 backward/forward 双栈，并恢复 DataTable 的 `Up` 默认行为。
+- DONE：更新双语 README；29 项 unittest、静态编译、diff 检查和 headless 组合键回归全部通过。

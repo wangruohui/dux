@@ -64,19 +64,23 @@ class CliTests(unittest.TestCase):
                 self.assertEqual(app.current_path, str(child))
                 app.action_go_back()
                 self.assertEqual(app.current_path, str(root))
+                app.action_go_forward()
+                self.assertEqual(app.current_path, str(child))
 
                 bindings = {(binding.key, binding.action) for binding in app.BINDINGS}
-                self.assertIn(("backspace", "go_back"), bindings)
-                self.assertIn(("up", "go_parent"), bindings)
+                self.assertIn(("backspace", "go_parent"), bindings)
+                self.assertIn(("alt+left", "go_back"), bindings)
+                self.assertIn(("alt+right", "go_forward"), bindings)
+                self.assertNotIn(("up", "go_parent"), bindings)
 
                 queued = []
                 refreshed = []
                 app.run_worker = lambda worker, **kwargs: queued.append(worker)
                 app._refresh_current_worker = lambda refresh_path: refreshed.append(refresh_path)
                 app.action_refresh_current()
-                app.current_path = str(child)
+                app.current_path = str(root)
                 queued[0]()
-                self.assertEqual(refreshed, [str(root)])
+                self.assertEqual(refreshed, [str(child)])
                 app.service.close()
             finally:
                 service.close()
@@ -119,11 +123,12 @@ class CliTests(unittest.TestCase):
             finally:
                 service.close()
 
-    def test_ui_keyboard_up_and_backspace_navigation(self) -> None:
+    def test_ui_keyboard_item_parent_and_history_navigation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "root"
             child = root / "child"
             child.mkdir(parents=True)
+            (root / "sibling").mkdir()
             db_path = Path(directory) / "dux.db"
             service = DuxService(db_path=db_path, max_workers=1)
             service.index_path(str(root))
@@ -135,13 +140,21 @@ class CliTests(unittest.TestCase):
 
                 async def exercise_keys() -> None:
                     async with app.run_test(size=(100, 30)) as pilot:
-                        await pilot.press("enter")
-                        self.assertEqual(app.current_path, str(child))
+                        table = app.query_one("#table")
+                        initial_row = table.cursor_row
+                        await pilot.press("down")
+                        self.assertGreater(table.cursor_row, initial_row)
                         await pilot.press("up")
+                        self.assertEqual(table.cursor_row, initial_row)
                         self.assertEqual(app.current_path, str(root))
+                        selected = app._selected_path()
+                        await pilot.press("enter")
+                        self.assertEqual(app.current_path, selected)
                         await pilot.press("backspace")
-                        self.assertEqual(app.current_path, str(child))
-                        await pilot.press("backspace")
+                        self.assertEqual(app.current_path, str(root))
+                        await pilot.press("alt+left")
+                        self.assertEqual(app.current_path, selected)
+                        await pilot.press("alt+right")
                         self.assertEqual(app.current_path, str(root))
 
                 asyncio.run(exercise_keys())

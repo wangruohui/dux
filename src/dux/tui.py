@@ -65,9 +65,6 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
                 self.app.action_open_selected()
             elif event.key == "backspace":
                 event.stop()
-                self.app.action_go_back()
-            elif event.key == "up":
-                event.stop()
                 self.app.action_go_parent()
             elif event.key == "right":
                 event.stop()
@@ -314,8 +311,9 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
             Binding("q", "request_quit", "Quit"),
             Binding("ctrl+c", "request_quit", "Quit"),
             Binding("enter", "open_selected", "Open"),
-            Binding("backspace", "go_back", "Back"),
-            Binding("up", "go_parent", "Parent"),
+            Binding("backspace", "go_parent", "Parent"),
+            Binding("alt+left", "go_back", "Back"),
+            Binding("alt+right", "go_forward", "Forward"),
             Binding("r", "refresh_current", "Refresh"),
             Binding("f", "filter_paths", "Filter"),
             Binding("x", "cancel_delete", "Cancel Active"),
@@ -332,7 +330,8 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
             super().__init__()
             self.service = DuxService(db_path=db_path, max_workers=workers, read_only=True)
             self.current_path = self.service.canonical(path)
-            self.navigation_stack: list[str] = []
+            self.navigation_back_stack: list[str] = []
+            self.navigation_forward_stack: list[str] = []
             self.sort_by = "size"
             self.reverse = True
             self.rows_by_key: dict[str, bool] = {}
@@ -520,7 +519,8 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
                 return
             previous = self.current_path
             if remember:
-                self.navigation_stack.append(previous)
+                self.navigation_back_stack.append(previous)
+                self.navigation_forward_stack.clear()
             self.marked_paths.clear()
             self.current_path = destination
             focus_path = previous if str(Path(previous).parent) == destination else None
@@ -532,10 +532,20 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
                 self._navigate_to(parent)
 
         def action_go_back(self) -> None:
-            if not self.navigation_stack:
-                self.notify("No previous directory.", severity="warning")
+            if not self.navigation_back_stack:
+                self.notify("No backward history.", severity="warning")
                 return
-            self._navigate_to(self.navigation_stack.pop(), remember=False)
+            destination = self.navigation_back_stack.pop()
+            self.navigation_forward_stack.append(self.current_path)
+            self._navigate_to(destination, remember=False)
+
+        def action_go_forward(self) -> None:
+            if not self.navigation_forward_stack:
+                self.notify("No forward history.", severity="warning")
+                return
+            destination = self.navigation_forward_stack.pop()
+            self.navigation_back_stack.append(self.current_path)
+            self._navigate_to(destination, remember=False)
 
         def action_refresh_current(self) -> None:
             if self.refresh_active:
