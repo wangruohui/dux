@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from dux.cli import build_parser
-from dux.service import DuxService
+from dux.service import DuxService, FilterEntry
 from dux.tui import run_ui
 
 
@@ -158,6 +158,80 @@ class CliTests(unittest.TestCase):
                         self.assertEqual(app.current_path, str(root))
 
                 asyncio.run(exercise_keys())
+                app.service.close()
+            finally:
+                service.close()
+
+    def test_filter_selection_sorts_by_size_files_and_date(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "root"
+            root.mkdir()
+            db_path = Path(directory) / "dux.db"
+            service = DuxService(db_path=db_path, max_workers=1)
+            service.index_path(str(root))
+            entries = [
+                FilterEntry(str(root / "large"), "large", True, True, 300, 1, 100.0),
+                FilterEntry(str(root / "many"), "many", True, True, 200, 30, 200.0),
+                FilterEntry(str(root / "newest"), "newest", True, True, 100, 2, 300.0),
+                FilterEntry(str(root / "live"), "live", True, False, None, None, 400.0),
+            ]
+            apps = []
+            try:
+                with patch("textual.app.App.run", lambda app, *args, **kwargs: apps.append(app)):
+                    run_ui(str(db_path), str(root), 1)
+                app = apps[0]
+
+                async def exercise_sorting() -> None:
+                    async with app.run_test(size=(120, 32)) as pilot:
+                        app._finish_filter(
+                            str(root),
+                            "*",
+                            "",
+                            [entry.path for entry in entries],
+                            entries,
+                            1,
+                            0.1,
+                            3,
+                            1,
+                            0,
+                            None,
+                        )
+                        await pilot.pause()
+                        screen = app.screen
+                        table = screen.query_one("#filter-results")
+
+                        def row_order() -> list[str]:
+                            result = []
+                            for row in range(table.row_count):
+                                table.move_cursor(row=row, column=0, animate=False)
+                                result.append(screen._current_result())
+                            return result
+
+                        self.assertEqual(
+                            row_order(),
+                            [entries[0].path, entries[1].path, entries[2].path, entries[3].path],
+                        )
+                        table.move_cursor(row=0, column=0, animate=False)
+                        await pilot.press("space")
+                        await pilot.press("c")
+                        self.assertEqual(
+                            row_order(),
+                            [entries[1].path, entries[2].path, entries[0].path, entries[3].path],
+                        )
+                        self.assertEqual(screen.selected_paths, {entries[0].path})
+                        await pilot.press("m")
+                        self.assertEqual(
+                            row_order(),
+                            [entries[2].path, entries[1].path, entries[0].path, entries[3].path],
+                        )
+                        await pilot.press("s")
+                        self.assertEqual(
+                            row_order(),
+                            [entries[0].path, entries[1].path, entries[2].path, entries[3].path],
+                        )
+                        self.assertIn("width: 94%", app.CSS)
+
+                asyncio.run(exercise_sorting())
                 app.service.close()
             finally:
                 service.close()

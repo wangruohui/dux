@@ -100,3 +100,10 @@
 
 - DONE：把单历史栈改为 backward/forward 双栈，并恢复 DataTable 的 `Up` 默认行为。
 - DONE：更新双语 README；29 项 unittest、静态编译、diff 检查和 headless 组合键回归全部通过。
+
+## Filter 选择表排序
+
+目标：Filter 结果选择删除页面支持按大小、递归文件数、日期排序，全部降序且未统计项排最后。
+
+- DONE：增加 `s/c/m` 排序、当前排序提示，并在重排后保留选择和光标。
+- DONE：确认弹窗宽度由 70% 扩至 94%；双语 README、30 项 unittest、静态编译、diff 检查和 headless modal 测试全部通过。

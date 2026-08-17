@@ -176,13 +176,13 @@ Filter matching is case-sensitive and applies a shell glob to each entry's basen
 
 Press `x` while filtering to stop the active search. The status line changes to `Cancelling filter...` until all scanner workers exit; partial matches are discarded. When no filter is active, `x` keeps its existing behavior of cancelling the latest delete job.
 
-The filter selection table uses the same metadata columns as normal browsing: size, recursive file count, date, and name. Indexed matches show database aggregates; live-only matches are labeled `unindexed`.
+The filter selection table uses the same metadata columns as normal browsing: size, recursive file count, date, and name. Press `s`, `c`, or `m` to sort by size, file count, or date. Sorting is descending and unindexed matches stay last. Indexed matches show database aggregates; live-only matches are labeled `unindexed`.
 
 筛选只对每个条目的 basename 做大小写敏感的 shell 通配符匹配，不涉及 `/`；例如 `a*` 匹配所有以 `a` 开头的名称。筛选会合并只读 SQLite 候选和实时文件系统扫描：保留现场存在的 indexed 匹配与 live-only 匹配；数据库中现场已消失的 stale 匹配只计数提示，不进入可选择的删除列表。目录命中后返回该目录且不再扫描其子目录，语义与 `find ... -prune` 一致。相对路径包含 exclude 关键字的条目会被跳过，其中目录不会继续进入。
 
 筛选过程中按 `x` 可停止当前检索；状态栏会显示 `Cancelling filter...`，直到 scanner worker 全部退出，已产生的部分结果不会进入选择表。没有 filter 运行时，`x` 仍用于取消最近一次删除任务。
 
-filter 选择表与普通浏览页面使用相同的元数据列：大小、递归文件数、日期和名称。已索引结果显示数据库聚合值，live-only 结果标记为 `unindexed`。
+filter 选择表与普通浏览页面使用相同的元数据列：大小、递归文件数、日期和名称。按 `s`、`c`、`m` 可分别按大小、文件数、日期降序排列，未统计项始终排在最后。已索引结果显示数据库聚合值，live-only 结果标记为 `unindexed`。
 
 In the filtered-result delete confirmation, `n` or `Esc` returns to the result table with the previous selections preserved; only `y` closes the result table and starts deletion.
 

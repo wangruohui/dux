@@ -138,6 +138,11 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
             elif event.key == "enter":
                 event.stop()
                 self.screen.action_accept_results()
+            elif event.key in {"s", "c", "m"}:
+                event.stop()
+                self.screen.action_sort_results(
+                    {"s": "size", "c": "count", "m": "mtime"}[event.key]
+                )
             elif event.key in {"escape", "q"}:
                 event.stop()
                 self.screen.dismiss(None)
@@ -150,11 +155,15 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
             self.paths = [entry.path for entry in entries]
             self.entries_by_path = {entry.path: entry for entry in entries}
             self.selected_paths: set[str] = set()
+            self.sort_by = "size"
 
         def compose(self) -> ComposeResult:
             yield Container(
                 Static(f"Filter results under {self.root}", classes="dialog-title"),
-                Static("Space: select    a: all/none    Enter: delete selected    Esc/q: cancel"),
+                Static(
+                    "s: size    c: files    m: date    Space: select    "
+                    "a: all/none    Enter: delete selected    Esc/q: cancel"
+                ),
                 Static(f"0/{len(self.paths)} selected", id="filter-result-status"),
                 FilterResultsTable(id="filter-results"),
                 id="results-dialog",
@@ -167,9 +176,34 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
             table.add_column("Files", key="files")
             table.add_column("Date", key="date")
             table.add_column("Name", key="name")
-            for entry in self.entries:
-                table.add_row(*self._row_values(entry, selected=False), key=entry.path)
+            self._render_results()
             table.focus()
+
+        def _sorted_entries(self) -> list[FilterEntry]:
+            def key(entry: FilterEntry) -> tuple[int, float, str]:
+                if self.sort_by == "count":
+                    value = entry.file_count
+                elif self.sort_by == "mtime":
+                    value = entry.mtime
+                else:
+                    value = entry.size_bytes
+                unindexed = not entry.indexed or value is None
+                return (int(unindexed), -float(value or 0), entry.path)
+
+            return sorted(self.entries, key=key)
+
+        def _render_results(self, focus_path: str | None = None) -> None:
+            table = self.query_one("#filter-results", DataTable)
+            table.clear()
+            row_by_path: dict[str, int] = {}
+            for entry in self._sorted_entries():
+                row_by_path[entry.path] = len(row_by_path)
+                table.add_row(*self._row_values(entry, selected=False), key=entry.path)
+                if entry.path in self.selected_paths:
+                    self._update_result(entry.path)
+            if focus_path in row_by_path:
+                table.move_cursor(row=row_by_path[focus_path], column=0, animate=False)
+            self._update_status()
 
         def _row_values(self, entry: FilterEntry, selected: bool) -> tuple[str | Text, ...]:
             if entry.size_bytes is None:
@@ -214,9 +248,16 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
                 table.update_cell(path, column, value)
 
         def _update_status(self) -> None:
+            sort_name = {"size": "size", "count": "files", "mtime": "date"}[self.sort_by]
             self.query_one("#filter-result-status", Static).update(
-                f"{len(self.selected_paths)}/{len(self.paths)} selected"
+                f"{len(self.selected_paths)}/{len(self.paths)} selected | "
+                f"sort={sort_name} descending | unindexed last"
             )
+
+        def action_sort_results(self, sort_by: str) -> None:
+            focus_path = self._current_result()
+            self.sort_by = sort_by
+            self._render_results(focus_path=focus_path)
 
         def action_toggle_result(self) -> None:
             path = self._current_result()
@@ -264,7 +305,7 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
             color: #d8e1ea;
         }
         #dialog {
-            width: 70%;
+            width: 94%;
             height: auto;
             background: #16212d;
             border: round #7dd3fc;
