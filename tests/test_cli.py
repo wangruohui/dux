@@ -88,12 +88,14 @@ class CliTests(unittest.TestCase):
 
                 queued = []
                 refreshed = []
+                selected_refresh_path = str(child / "selected-refresh")
+                app._selected_path = lambda: selected_refresh_path
                 app.run_worker = lambda worker, **kwargs: queued.append(worker)
                 app._refresh_current_worker = lambda refresh_path: refreshed.append(refresh_path)
                 app.action_refresh_current()
                 app.current_path = str(root)
                 queued[0]()
-                self.assertEqual(refreshed, [str(child)])
+                self.assertEqual(refreshed, [selected_refresh_path])
                 app.service.close()
             finally:
                 service.close()

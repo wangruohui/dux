@@ -48,7 +48,7 @@ class FilterResult:
     elapsed_seconds: float
     indexed_matches: int
     live_only_matches: int
-    stale_index_matches: int
+    stale_index_matches: int | None
 
 
 @dataclass(slots=True)
@@ -127,64 +127,6 @@ class DuxService:
             raise FilterCancelled("filter cancelled")
 
         started_at = time.monotonic()
-        filter_conn = db.connect_readonly(
-            self.db_path,
-            immutable=self.immutable_fallback,
-        )
-        filter_conn.set_progress_handler(lambda: int(cancelled()), 1000)
-        try:
-            try:
-                indexed_rows = db.fetch_filter_candidates(filter_conn, root, keyword)
-            except sqlite3.OperationalError as exc:
-                if cancelled():
-                    raise FilterCancelled("filter cancelled") from exc
-                raise
-        finally:
-            filter_conn.close()
-        if cancelled():
-            raise FilterCancelled("filter cancelled")
-        indexed_candidates: list[FilterEntry] = []
-        for row in indexed_rows:
-            if cancelled():
-                raise FilterCancelled("filter cancelled")
-            candidate = str(row["path"])
-            if exclude and exclude in os.path.relpath(candidate, root):
-                continue
-            if fnmatch.fnmatchcase(str(row["name"]), keyword):
-                indexed_candidates.append(
-                    FilterEntry(
-                        path=candidate,
-                        name=str(row["name"]),
-                        is_dir=bool(row["is_dir"]),
-                        indexed=bool(row["indexed"]),
-                        size_bytes=int(row["size_bytes"]),
-                        file_count=int(row["file_count"]),
-                        mtime=0.0,
-                    )
-                )
-
-        indexed_live: dict[str, FilterEntry] = {}
-        stale_index_matches = 0
-        matched_index_dirs: list[str] = []
-        for entry in sorted(
-            indexed_candidates,
-            key=lambda item: (len(Path(item.path).parts), item.path),
-        ):
-            if cancelled():
-                raise FilterCancelled("filter cancelled")
-            candidate = entry.path
-            if any(
-                candidate.startswith(matched_dir.rstrip("/") + "/")
-                for matched_dir in matched_index_dirs
-            ):
-                continue
-            if entry.is_dir:
-                matched_index_dirs.append(candidate)
-            if not os.path.lexists(candidate):
-                stale_index_matches += 1
-                continue
-            indexed_live[candidate] = entry
-
         work: queue.Queue[str | None] = queue.Queue()
         work.put(root)
         matches: dict[str, bool] = {}
@@ -225,7 +167,7 @@ class DuxService:
                 scanned_dirs += 1
                 current_dirs = scanned_dirs
             with matches_lock:
-                current_matches = len(set(indexed_live).union(matches))
+                current_matches = len(matches)
             if progress is not None and progress_interval > 0 and current_dirs % progress_interval == 0:
                 progress(current_dirs, current_matches, directory)
 
@@ -260,7 +202,7 @@ class DuxService:
             raise errors[0]
         if cancelled():
             raise FilterCancelled("filter cancelled")
-        combined = set(indexed_live).union(matches)
+        combined = set(matches)
         final_paths: list[str] = []
         matched_dirs: list[str] = []
         for candidate in sorted(combined, key=lambda item: (len(Path(item).parts), item)):
@@ -272,14 +214,41 @@ class DuxService:
             ):
                 continue
             final_paths.append(candidate)
-            indexed_entry = indexed_live.get(candidate)
-            if matches.get(candidate, bool(indexed_entry and indexed_entry.is_dir)):
+            if matches[candidate]:
                 matched_dirs.append(candidate)
         sorted_paths = sorted(final_paths)
         final_path_set = set(sorted_paths)
+        filter_conn = db.connect_readonly(
+            self.db_path,
+            immutable=self.immutable_fallback,
+        )
+        filter_conn.set_progress_handler(lambda: int(cancelled()), 1000)
+        try:
+            try:
+                indexed_rows = db.fetch_nodes_by_paths(filter_conn, sorted_paths)
+            except sqlite3.OperationalError as exc:
+                if cancelled():
+                    raise FilterCancelled("filter cancelled") from exc
+                raise
+        finally:
+            filter_conn.close()
+        if cancelled():
+            raise FilterCancelled("filter cancelled")
+        indexed_by_path = {
+            str(row["path"]): FilterEntry(
+                path=str(row["path"]),
+                name=str(row["name"]),
+                is_dir=bool(row["is_dir"]),
+                indexed=bool(row["indexed"]),
+                size_bytes=int(row["size_bytes"]),
+                file_count=int(row["file_count"]),
+                mtime=0.0,
+            )
+            for row in indexed_rows
+        }
         entries: list[FilterEntry] = []
         for candidate in sorted_paths:
-            indexed_entry = indexed_live.get(candidate)
+            indexed_entry = indexed_by_path.get(candidate)
             if indexed_entry is not None:
                 entries.append(
                     FilterEntry(
@@ -309,9 +278,9 @@ class DuxService:
             entries=entries,
             scanned_dirs=scanned_dirs,
             elapsed_seconds=time.monotonic() - started_at,
-            indexed_matches=len(final_path_set.intersection(indexed_live)),
-            live_only_matches=len(final_path_set.intersection(matches).difference(indexed_live)),
-            stale_index_matches=stale_index_matches,
+            indexed_matches=len(final_path_set.intersection(indexed_by_path)),
+            live_only_matches=len(final_path_set.difference(indexed_by_path)),
+            stale_index_matches=None,
         )
 
     def index_path(
@@ -574,10 +543,8 @@ class DuxService:
         if writer_errors:
             raise writer_errors[0]
 
-        indexed_targets = dict(targets)
         for target in completed_targets:
-            if indexed_targets[target]:
-                self._delete_subtree_from_index(target, lock_status=report_lock_wait)
+            self._delete_subtree_from_index(target, lock_status=report_lock_wait)
             if status is not None:
                 status(target, "index-synced")
 
@@ -636,23 +603,19 @@ class DuxService:
                 if completed:
                     completed_targets.append(target)
 
-        indexed_targets = dict(targets)
-        incomplete_indexed = any(
-            indexed and target not in completed_targets for target, indexed in targets
-        )
+        incomplete_target = any(target not in completed_targets for target, _indexed in targets)
         sync_error: BaseException | None = None
-        indexed_completed = [target for target in completed_targets if indexed_targets[target]]
-        if indexed_completed:
+        if completed_targets:
             sync_service: DuxService | None = None
             try:
                 if status is not None:
-                    status(indexed_completed[0], "syncing-index-after-delete")
+                    status(completed_targets[0], "syncing-index-after-delete")
                 sync_service = DuxService(
                     db_path=self.db_path,
                     max_workers=self.max_workers,
                     delete_slots=self.delete_slots,
                 )
-                for target in indexed_completed:
+                for target in completed_targets:
                     sync_service._delete_subtree_from_index(
                         target,
                         lock_status=(
@@ -666,7 +629,7 @@ class DuxService:
             except BaseException as exc:
                 sync_error = exc
                 if status is not None:
-                    status(indexed_completed[0], f"index-sync-deferred:{exc}")
+                    status(completed_targets[0], f"index-sync-deferred:{exc}")
             finally:
                 if sync_service is not None:
                     sync_service.close()
@@ -674,7 +637,7 @@ class DuxService:
         return FilesystemDeleteResult(
             completed_targets=completed_targets,
             cancelled=operation_cancel.is_set() and len(completed_targets) < len(targets),
-            index_synchronized=not incomplete_indexed and sync_error is None,
+            index_synchronized=not incomplete_target and sync_error is None,
             error=errors[0] if errors else sync_error,
         )
 
@@ -813,15 +776,6 @@ class DuxService:
         root: str,
         lock_status: Callable[[str], None] | None = None,
     ) -> None:
-        row = db.fetch_node(self.conn, root)
-        if row is None:
-            return
-        size_delta = -int(row["size_bytes"])
-        file_delta = -int(row["file_count"])
-        dir_delta = -int(row["dir_count"])
-        if bool(row["is_dir"]):
-            dir_delta -= 1
-
         with db.writer_transaction(
             self.conn,
             "delete-subtree",
@@ -829,7 +783,7 @@ class DuxService:
             on_wait=lock_status,
         ):
             db.delete_subtree_rows(self.conn, root)
-            db.apply_delta_to_ancestors(self.conn, root, size_delta, file_delta, dir_delta)
+            db.refresh_ancestor_aggregates(self.conn, root)
 
     def _move_to_trash(self, path: str) -> str:
         home = Path.home().resolve()

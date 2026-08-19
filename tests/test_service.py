@@ -420,6 +420,52 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(root["file_count"], 0)
         self.assertGreaterEqual(len(progress), 2)
 
+    def test_large_completed_delete_removes_entire_index_subtree(self) -> None:
+        target = self.root / "many-small-files"
+        target.mkdir()
+        for index in range(6001):
+            (target / f"file-{index}.bin").write_bytes(b"x")
+        self.service.index_path(str(self.root))
+
+        self.service.delete_path(str(target), permanent=True, unlink_workers=64)
+
+        child_lower = f"{target}/"
+        child_upper = f"{target}0"
+        remaining_rows = self.service.conn.execute(
+            "SELECT count(*) FROM nodes WHERE path = ? OR (path >= ? AND path < ?)",
+            (str(target), child_lower, child_upper),
+        ).fetchone()[0]
+        self.assertFalse(target.exists())
+        self.assertEqual(remaining_rows, 0)
+        root = self.service.get_node(str(self.root))
+        self.assertEqual(int(root["size_bytes"]), 0)
+        self.assertEqual(int(root["file_count"]), 0)
+
+    def test_completed_delete_cleans_orphan_index_descendants(self) -> None:
+        target = self.root / "orphaned-target"
+        target.mkdir()
+        live_file = target / "live.bin"
+        stale_file = target / "stale.bin"
+        live_file.write_bytes(b"live")
+        stale_file.write_bytes(b"stale")
+        self.service.index_path(str(self.root))
+        stale_file.unlink()
+        with db.writer_transaction(self.service.conn, "test-remove-root-row", str(target)):
+            self.service.conn.execute("DELETE FROM nodes WHERE path = ?", (str(target),))
+
+        self.service.delete_path(str(target), permanent=True, unlink_workers=4)
+
+        child_lower = f"{target}/"
+        child_upper = f"{target}0"
+        remaining_rows = self.service.conn.execute(
+            "SELECT count(*) FROM nodes WHERE path = ? OR (path >= ? AND path < ?)",
+            (str(target), child_lower, child_upper),
+        ).fetchone()[0]
+        self.assertEqual(remaining_rows, 0)
+        root = self.service.get_node(str(self.root))
+        self.assertEqual(int(root["size_bytes"]), 0)
+        self.assertEqual(int(root["file_count"]), 0)
+
     def test_cancelled_delete_flushes_incremental_index_updates(self) -> None:
         sub = self.root / "cancel-me"
         sub.mkdir()
@@ -515,13 +561,28 @@ class ServiceTests(unittest.TestCase):
         stale.unlink()
         live_only = self.root / "live-target"
         live_only.write_bytes(b"live")
+        fetched_paths: list[str] = []
+        real_fetch_nodes = db.fetch_nodes_by_paths
 
-        result = self.service.filter_paths(str(self.root), "*target")
+        def track_fetch_nodes(conn, paths):
+            fetched_paths.extend(paths)
+            return real_fetch_nodes(conn, paths)
+
+        with patch(
+            "dux.service.os.path.lexists",
+            side_effect=AssertionError("filter must not stat every stale database candidate"),
+        ), patch(
+            "dux.service.db.fetch_nodes_by_paths",
+            side_effect=track_fetch_nodes,
+        ):
+            result = self.service.filter_paths(str(self.root), "*target")
 
         self.assertEqual(result.paths, [str(indexed), str(live_only)])
         self.assertEqual(result.indexed_matches, 1)
         self.assertEqual(result.live_only_matches, 1)
-        self.assertEqual(result.stale_index_matches, 1)
+        self.assertIsNone(result.stale_index_matches)
+        self.assertEqual(set(fetched_paths), {str(indexed), str(live_only)})
+        self.assertNotIn(str(stale), fetched_paths)
         entries = {entry.path: entry for entry in result.entries}
         self.assertTrue(entries[str(indexed)].indexed)
         self.assertEqual(entries[str(indexed)].size_bytes, len(b"indexed"))

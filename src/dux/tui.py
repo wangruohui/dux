@@ -608,7 +608,10 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
             if self.refresh_active:
                 self.notify(f"Refresh already running: {self.refresh_path}", severity="warning")
                 return
-            refresh_path = self.current_path
+            refresh_path = self._selected_path()
+            if refresh_path is None:
+                self.notify("Select a file or directory to refresh.", severity="warning")
+                return
             self.refresh_active = True
             self.refresh_path = refresh_path
             self._set_status(f"Background refresh started: {refresh_path}")
@@ -776,7 +779,7 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
             elapsed: float,
             indexed_matches: int,
             live_only_matches: int,
-            stale_index_matches: int,
+            stale_index_matches: int | None,
             error: Exception | None,
             cancelled: bool = False,
         ) -> None:
@@ -792,14 +795,9 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
                 return
             self._set_status(
                 f"Filter complete: {len(paths)} match(es), indexed-live={indexed_matches} "
-                f"live-only={live_only_matches} stale-db={stale_index_matches}, "
+                f"live-only={live_only_matches} stale-db=not-enumerated, "
                 f"{scanned_dirs} dirs in {elapsed:.1f}s"
             )
-            if stale_index_matches:
-                self.notify(
-                    f"Skipped {stale_index_matches} stale database match(es) missing from the filesystem.",
-                    severity="warning",
-                )
             if not paths:
                 self.notify(
                     f"No paths matching {keyword!r} under {root}; exclude={exclude!r}",

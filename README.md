@@ -143,8 +143,8 @@ dux --workers 16 index /data/project
 - `Space`：选择或取消选择当前行；选中行会高亮并显示 `[x]`。选择仅限当前目录页面，进入子目录或返回父目录时会清空。
 - `Delete` / `Shift+Delete`: delete marked rows visible on the current page; otherwise delete the current row. Hidden selections from another directory are never included. Files within a directory and multiple delete jobs run concurrently while sharing a global concurrency limit of 256. Press `y` to confirm, `n` or `Esc` to cancel.
 - `Delete` / `Shift+Delete`：只删除当前页面中可见的已选行；否则删除当前光标行，其他目录中的隐藏选择绝不会被带入。目录内部文件和多个删除任务都会并行删除，并共享全局 256 并发限制。按 `y` 确认，按 `n` 或 `Esc` 取消。
-- `r`: refresh the current subtree in the background. Scanning uses a staging database and the completed subtree is merged in one short transaction.
-- `r`：在后台刷新当前子树；扫描写入 staging 数据库，完成后用一个短事务合并。
+- `r`: refresh the path under the current cursor in the background. Scanning uses a staging database and the completed subtree is merged in one short transaction.
+- `r`：在后台刷新当前光标所在的路径；扫描写入 staging 数据库，完成后用一个短事务合并。
 - `f`: recursively find file/directory basenames using shell globs such as `a*`, with optional exclude-path pruning; it remains available while deletion runs.
 - `f`：在当前目录下递归使用 `a*` 等 shell 通配符匹配文件或目录 basename，可填写 exclude 关键字剪枝；删除期间仍可使用。
 - `x`: cancel the most recently started job that has not already received a cancellation request. Press repeatedly to cancel the remaining jobs one by one. Completed filesystem deletions are flushed to SQLite before each cancellation finishes.
@@ -170,17 +170,17 @@ Press `s`, `c`, or `m` once to sort that field descending; press the same key ag
 
 第一次按 `s`、`c` 或 `m` 会按对应字段降序排列，连续第二次按相同键切换为升序；切换字段后重新从降序开始。未统计项始终排在已统计项之后。
 
-During deletion, the status line reports the active phase. File removal shows a progress bar, processed entry count, throughput, ETA, and current path. Successfully removed entries are continuously sent to a batched SQLite writer, which deletes their nodes and propagates size/file/directory deltas to every indexed parent. Cancelling does not rescan the target.
+During deletion, the status line reports the active phase. File removal shows a progress bar, processed entry count, throughput, ETA, and current path. Successfully removed entries are continuously sent to a batched SQLite writer. A completed target is then removed unconditionally by path prefix and every ancestor aggregate is recomputed, including when the target root row was already missing. Cancelling does not rescan the target.
 
-删除过程中，状态栏会显示当前阶段。文件删除阶段会显示进度条、已处理条目数、吞吐、ETA 和当前路径。成功删除的条目会持续投递给 SQLite writer 批量删节点，并把大小、文件数和目录数变化同步到所有已索引父级；取消时不会重新扫描目标。
+删除过程中，状态栏会显示当前阶段。文件删除阶段会显示进度条、已处理条目数、吞吐、ETA 和当前路径。成功删除的条目会持续投递给 SQLite writer；目标完整删除后还会无条件按路径前缀清理整棵索引并重新计算所有父级，即使目标根节点已经缺失也不会留下 orphan 行。取消时不会重新扫描目标。
 
-Filter matching is case-sensitive and applies a shell glob to each entry's basename only; `/` is not part of the match. For example, `a*` matches names beginning with `a`. Filter combines read-only SQLite candidates with a live filesystem scan: existing indexed matches and live-only matches are merged, while stale database matches missing from the filesystem are counted but excluded from the selectable deletion list. When a directory matches, it is returned and its descendants are not scanned, following `find ... -prune` semantics. If the relative path contains the exclude keyword, that entry is skipped; excluded directories are not entered.
+Filter matching is case-sensitive and applies a shell glob to each entry's basename only; `/` is not part of the match. For example, `a*` matches names beginning with `a`. Filter scans the live filesystem first, then batch-fetches SQLite metadata only for the final live matches. Stale database paths are ignored without enumerating or `stat`-ing them, while live-only paths remain visible. When a directory matches, it is returned and its descendants are not scanned, following `find ... -prune` semantics. If the relative path contains the exclude keyword, that entry is skipped; excluded directories are not entered.
 
 Press `x` while filtering to stop the active search. The status line changes to `Cancelling filter...` until all scanner workers exit; partial matches are discarded. When no filter is active, `x` keeps its existing behavior of cancelling the latest delete job.
 
 The filter selection table uses the same metadata columns as normal browsing: size, recursive file count, date, and name. Press `s`, `c`, or `m` to sort by size, file count, or date; press the same key again to reverse the direction. Unindexed matches stay last. Indexed matches show database aggregates; live-only matches are labeled `unindexed`.
 
-筛选只对每个条目的 basename 做大小写敏感的 shell 通配符匹配，不涉及 `/`；例如 `a*` 匹配所有以 `a` 开头的名称。筛选会合并只读 SQLite 候选和实时文件系统扫描：保留现场存在的 indexed 匹配与 live-only 匹配；数据库中现场已消失的 stale 匹配只计数提示，不进入可选择的删除列表。目录命中后返回该目录且不再扫描其子目录，语义与 `find ... -prune` 一致。相对路径包含 exclude 关键字的条目会被跳过，其中目录不会继续进入。
+筛选只对每个条目的 basename 做大小写敏感的 shell 通配符匹配，不涉及 `/`；例如 `a*` 匹配所有以 `a` 开头的名称。Filter 会先扫描实时文件系统，再只为最终仍存在的命中路径批量读取 SQLite 元数据；数据库中的 stale 路径无需枚举或逐条 `stat` 即可忽略，live-only 路径仍会正常显示。目录命中后返回该目录且不再扫描其子目录，语义与 `find ... -prune` 一致。相对路径包含 exclude 关键字的条目会被跳过，其中目录不会继续进入。
 
 筛选过程中按 `x` 可停止当前检索；状态栏会显示 `Cancelling filter...`，直到 scanner worker 全部退出，已产生的部分结果不会进入选择表。没有 filter 运行时，`x` 仍用于取消最近一次删除任务。
 

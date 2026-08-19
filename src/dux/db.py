@@ -353,42 +353,53 @@ def refresh_placeholder_ancestor_aggregates(conn: sqlite3.Connection, root_path:
         )
 
 
+def refresh_ancestor_aggregates(conn: sqlite3.Connection, root_path: str) -> None:
+    for ancestor in Path(root_path).parents:
+        path = str(ancestor)
+        if fetch_node(conn, path) is None:
+            continue
+        sums = conn.execute(
+            """
+            SELECT
+                sum(size_bytes) AS size_bytes,
+                sum(file_count) AS file_count,
+                sum(dir_count + CASE WHEN is_dir THEN 1 ELSE 0 END) AS dir_count
+            FROM nodes
+            WHERE parent_path = ?
+            """,
+            (path,),
+        ).fetchone()
+        conn.execute(
+            """
+            UPDATE nodes
+            SET size_bytes = ?, file_count = ?, dir_count = ?, updated_at = ?
+            WHERE path = ?
+            """,
+            (
+                int(sums["size_bytes"] or 0),
+                int(sums["file_count"] or 0),
+                int(sums["dir_count"] or 0),
+                time.time(),
+                path,
+            ),
+        )
+
+
 def fetch_node(conn: sqlite3.Connection, path: str) -> sqlite3.Row | None:
     return conn.execute("SELECT * FROM nodes WHERE path = ?", (path,)).fetchone()
 
 
+def fetch_nodes_by_paths(conn: sqlite3.Connection, paths: list[str]) -> list[sqlite3.Row]:
+    rows: list[sqlite3.Row] = []
+    for offset in range(0, len(paths), 500):
+        chunk = paths[offset : offset + 500]
+        placeholders = ",".join("?" for _ in chunk)
+        rows.extend(conn.execute(f"SELECT * FROM nodes WHERE path IN ({placeholders})", chunk))
+    return rows
+
+
 def fetch_children(conn: sqlite3.Connection, path: str) -> list[sqlite3.Row]:
     return list(conn.execute("SELECT * FROM nodes WHERE parent_path = ?", (path,)))
-
-
-def fetch_filter_candidates(
-    conn: sqlite3.Connection,
-    root_path: str,
-    name_pattern: str,
-) -> list[sqlite3.Row]:
-    if root_path == "/":
-        return list(
-            conn.execute(
-                """
-                SELECT path, name, is_dir, indexed, size_bytes, file_count
-                FROM nodes
-                WHERE path != '/' AND name GLOB ?
-                """,
-                (name_pattern,),
-            )
-        )
-    child_lower = f"{root_path}/"
-    child_upper = f"{root_path}0"
-    return list(
-        conn.execute(
-            """
-            SELECT path, name, is_dir, indexed, size_bytes, file_count
-            FROM nodes
-            WHERE path >= ? AND path < ? AND name GLOB ?
-            """,
-            (child_lower, child_upper, name_pattern),
-        )
-    )
 
 
 def delete_subtree_rows(conn: sqlite3.Connection, root_path: str) -> None:
