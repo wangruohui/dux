@@ -29,18 +29,31 @@ s size  c count  m date  n name  r refresh  f filter  x cancel active  q quit
 
 `dux ui` 和 `dux ls` 以只读方式打开索引，因此索引所在文件系统或用户配额耗尽时仍可使用。如果 SQLite 无法只读挂载 WAL/SHM，UI 会退回 immutable 主库快照，并提示可能忽略尚未 checkpoint 的 WAL 数据；永久删除若因空间耗尽无法建立写连接，会先释放文件空间，再同步已删除的索引子树。
 
+## Latest Features / 最新功能
+
+- **Refresh what you are looking at**: press `r` to rescan the item under the cursor in the background while the UI stays responsive; the completed subtree is merged through a short SQLite transaction.
+- **刷新光标所在内容**：按 `r` 即可在后台重新统计光标所在项目，UI 保持可操作；完成后的子树通过短 SQLite 事务合并。
+- **Live-first recursive filter**: press `f` to search the current tree with shell globs and optional exclude pruning. Live filesystem results are combined with indexed size, file count, and date metadata without walking stale database paths.
+- **实时优先递归筛选**：按 `f` 使用 shell 通配符检索当前子树，并可通过 exclude 剪枝；实时文件系统结果会与索引中的大小、文件数和日期合并，同时避免遍历 stale 数据库路径。
+- **Index-consistent deletion**: completed deletes remove the entire indexed path prefix and recompute every ancestor aggregate, even if the deleted root row was already missing.
+- **删除后索引一致**：删除完成后会清理目标路径前缀下的整棵索引并重算所有父级，即使目标根记录已经缺失，也不会遗留孤立条目。
+- **Reversible sorting everywhere**: browsing and filter-result tables support size, recursive file count, date, and name; press the active metric again to reverse the order, with unindexed entries always last.
+- **所有列表均可双向排序**：浏览页和筛选结果页支持大小、递归文件数、日期、名称排序；再次按当前排序键即可反转顺序，未统计项始终置后。
+- **Responsive, cancellable cleanup**: multiple delete jobs and per-tree workers share bounded concurrency, continuously flush successful removals to SQLite, and expose progress, throughput, ETA, and `x` cancellation.
+- **响应式、可取消清理**：多个删除任务与目录内部 worker 共享受控并发，成功删除会持续同步 SQLite，并显示进度、吞吐、ETA，支持按 `x` 取消。
+
 ## Highlights / 亮点
 
 - **Multi-threaded indexing**: scans directory trees with worker threads and stores aggregate metadata in SQLite.
 - **多线程统计**：使用 worker 线程遍历目录树，把聚合后的大小、文件数、目录数写入 SQLite。
 - **Terminal UI**: browse large trees over SSH without a desktop environment.
 - **终端可视化**：纯命令行 UI，适合 SSH 和服务器环境。
-- **Sort by the metric that matters**: size, recursive file count, modification time, or name.
-- **多维排序**：支持按大小、递归文件数、修改时间、名称排序。
+- **Sort by the metric that matters**: size, recursive file count, modification time, or name, in either direction.
+- **多维双向排序**：支持按大小、递归文件数、修改时间、名称升序或降序排列。
 - **Size and file count together**: find both storage-heavy and inode-heavy directories.
 - **大小和文件数同时展示**：既能找占容量的目录，也能找小文件数量爆炸的目录。
-- **Local refresh**: `dux index /some/subtree` refreshes only that subtree and propagates deltas to indexed parents.
-- **局部刷新**：对变化的子树重新 `index` 即可，父路径聚合值会自动更新。
+- **Local refresh**: `dux index /some/subtree` refreshes only that subtree and propagates deltas to indexed parents; inside the UI, `r` refreshes the cursor item in the background.
+- **局部刷新**：对变化的子树重新 `index` 即可，父路径聚合值会自动更新；UI 中按 `r` 可后台刷新光标项目。
 - **Partial navigation**: ancestors of indexed subtrees are kept as navigation placeholders; unindexed live entries are shown as `unindexed`.
 - **部分索引导航**：已统计子树的父路径会保留导航骨架，未统计的现场条目标记为 `unindexed`。
 - **Cursor and batch delete**: use `Delete` or `Shift+Delete` to delete the current row, or `Space` to mark multiple rows and delete them together.
