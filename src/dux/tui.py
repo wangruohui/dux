@@ -1200,4 +1200,4 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
                 self._set_status(outcome)
             self._reload_table()
 
-    DuxApp().run()
+    DuxApp().run(mouse=False)

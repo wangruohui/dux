@@ -28,13 +28,18 @@ class CliTests(unittest.TestCase):
             service = DuxService(db_path=db_path, max_workers=1)
             service.index_path(str(root))
             service.conn.execute("BEGIN IMMEDIATE")
-            apps = []
+            runs = []
             try:
-                with patch("textual.app.App.run", lambda app, *args, **kwargs: apps.append(app)):
+                with patch(
+                    "textual.app.App.run",
+                    lambda app, *args, **kwargs: runs.append((app, kwargs)),
+                ):
                     run_ui(str(db_path), str(root), 1)
-                self.assertEqual(len(apps), 1)
-                self.assertTrue(apps[0].service.read_only)
-                apps[0].service.close()
+                self.assertEqual(len(runs), 1)
+                app, run_options = runs[0]
+                self.assertIs(run_options["mouse"], False)
+                self.assertTrue(app.service.read_only)
+                app.service.close()
             finally:
                 service.conn.rollback()
                 service.close()

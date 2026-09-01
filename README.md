@@ -172,8 +172,8 @@ dux --workers 16 index /data/project
 - `n`：按名称排序。
 - `q`: quit. If a background refresh is active, `dux` cancels it, discards the staging database, and exits after worker cleanup finishes. Active filter and delete jobs still block quitting.
 - `q`：退出。如果后台刷新正在运行，`dux` 会先取消刷新、丢弃 staging 数据库，并在 worker 清理完成后安全退出；filter 和删除任务仍会阻止退出。
-- `Shift` + mouse drag: select terminal text while Textual mouse reporting is active.
-- `Shift` + 鼠标拖拽：Textual 启用鼠标事件时，用此方式选择终端文字。
+- Mouse input is reserved for the terminal client: the TUI does not capture clicks, scrolling, or dragging, so normal mouse selection and copy work without holding `Shift`.
+- 鼠标输入完全交还终端客户端：TUI 不捕获点击、滚轮或拖拽，因此无需按住 `Shift` 即可正常选择和复制文字。
 
 The graph column follows the active metric: size mode uses bytes, count mode uses recursive file count.
 
