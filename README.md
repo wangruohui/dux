@@ -18,7 +18,7 @@ Path: /data/project                         Sort: size
 └──────────┴───────────┴────────────┴──────────────────────────────┴────────────────────┘
 
 Enter open  Backspace parent  Alt+Left/Right history  Space select  Del/Shift+Del delete
-s size  c count  m date  n name  r refresh  f filter  x cancel active  q quit
+s size  c count  m date  n name  r refresh  f filter  x cancel filter/refresh/delete  q quit
 ```
 
 `dux` answers the cleanup question quickly: what is using space, how many files are there, what changed, and what can be safely removed?
@@ -39,8 +39,8 @@ s size  c count  m date  n name  r refresh  f filter  x cancel active  q quit
 - **删除后索引一致**：删除完成后会清理目标路径前缀下的整棵索引并重算所有父级，即使目标根记录已经缺失，也不会遗留孤立条目。
 - **Reversible sorting everywhere**: browsing and filter-result tables support size, recursive file count, date, and name; press the active metric again to reverse the order, with unindexed entries always last.
 - **所有列表均可双向排序**：浏览页和筛选结果页支持大小、递归文件数、日期、名称排序；再次按当前排序键即可反转顺序，未统计项始终置后。
-- **Responsive, cancellable cleanup**: multiple delete jobs and per-tree workers share bounded concurrency, continuously flush successful removals to SQLite, and expose progress, throughput, ETA, and `x` cancellation.
-- **响应式、可取消清理**：多个删除任务与目录内部 worker 共享受控并发，成功删除会持续同步 SQLite，并显示进度、吞吐、ETA，支持按 `x` 取消。
+- **Responsive, cancellable background work**: press `x` to cancel an active filter, refresh, or the latest delete job. Multiple delete jobs and per-tree workers share bounded concurrency and continuously flush successful removals to SQLite.
+- **响应式、可取消后台任务**：按 `x` 可取消正在运行的筛选、刷新或最近一次删除任务。多个删除任务与目录内部 worker 共享受控并发，成功删除会持续同步 SQLite。
 
 ## Highlights / 亮点
 
@@ -160,8 +160,8 @@ dux --workers 16 index /data/project
 - `r`：在后台刷新当前光标所在的路径；扫描写入 staging 数据库，完成后用一个短事务合并。
 - `f`: recursively find file/directory basenames using shell globs such as `a*`, with optional exclude-path pruning; it remains available while deletion runs.
 - `f`：在当前目录下递归使用 `a*` 等 shell 通配符匹配文件或目录 basename，可填写 exclude 关键字剪枝；删除期间仍可使用。
-- `x`: cancel the most recently started job that has not already received a cancellation request. Press repeatedly to cancel the remaining jobs one by one. Completed filesystem deletions are flushed to SQLite before each cancellation finishes.
-- `x`：取消最近启动且尚未请求取消的任务；重复按下可依次取消其余任务。每个任务取消完成前，已经删除的文件和目录都会同步写入 SQLite。
+- `x`: cancel an active filter first, then an active background refresh, otherwise the latest delete job that has not received a cancellation request. Press repeatedly to cancel remaining delete jobs one by one. A cancelled refresh discards its staging database without changing the committed index; completed filesystem deletions are flushed to SQLite before delete cancellation finishes.
+- `x`：优先取消正在运行的筛选，其次取消后台刷新，否则取消最近启动且尚未请求取消的删除任务；重复按下可依次取消其余删除任务。刷新取消后会丢弃 staging 数据库，不改变已提交索引；删除取消完成前，已经删除的文件和目录会同步写入 SQLite。
 - `s`: sort by size.
 - `s`：按大小排序。
 - `c`: sort by recursive file count.

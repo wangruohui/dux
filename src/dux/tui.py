@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 
 from . import db
-from .service import DeleteCancelled, DuxService, FilterCancelled, FilterEntry
+from .service import DeleteCancelled, DuxService, FilterCancelled, FilterEntry, IndexCancelled
 
 
 def _human_bytes(size: int) -> str:
@@ -403,6 +403,7 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
             self.filter_cancel_event: threading.Event | None = None
             self.refresh_active = False
             self.refresh_path: str | None = None
+            self.refresh_cancel_event: threading.Event | None = None
 
         @property
         def delete_active(self) -> bool:
@@ -614,11 +615,17 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
                 return
             self.refresh_active = True
             self.refresh_path = refresh_path
+            cancel_event = threading.Event()
+            self.refresh_cancel_event = cancel_event
             self._set_status(f"Background refresh started: {refresh_path}")
             self.notify(f"Refreshing {refresh_path} in the background")
-            self.run_worker(lambda: self._refresh_current_worker(refresh_path), thread=True)
+            self.run_worker(
+                lambda: self._refresh_current_worker(refresh_path, cancel_event), thread=True
+            )
 
-        def _refresh_current_worker(self, refresh_path: str) -> None:
+        def _refresh_current_worker(
+            self, refresh_path: str, cancel_event: threading.Event
+        ) -> None:
             refresh_service: DuxService | None = None
             started_at = time.monotonic()
             try:
@@ -628,25 +635,40 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
                 )
                 refresh_service.index_path(
                     refresh_path,
-                    progress=lambda count, current: self.call_from_thread(
-                        self._set_status,
-                        f"Refreshing {refresh_path}: {count} entries "
-                        f"({count / max(time.monotonic() - started_at, 0.001):.0f}/s) current={current}",
+                    progress=lambda count, current: (
+                        self.call_from_thread(
+                            self._set_status,
+                            f"Refreshing {refresh_path}: {count} entries "
+                            f"({count / max(time.monotonic() - started_at, 0.001):.0f}/s) "
+                            f"current={current}",
+                        )
+                        if not cancel_event.is_set()
+                        else None
                     ),
                     lock_status=lambda owner: self.call_from_thread(
                         self._set_status, f"Refresh waiting for database writer: {owner}"
                     ),
+                    cancel_event=cancel_event,
                 )
-                self.call_from_thread(self._finish_refresh, refresh_path, None)
+                self.call_from_thread(self._finish_refresh, refresh_path, None, False)
+            except IndexCancelled:
+                self.call_from_thread(self._finish_refresh, refresh_path, None, True)
             except Exception as exc:
-                self.call_from_thread(self._finish_refresh, refresh_path, exc)
+                self.call_from_thread(self._finish_refresh, refresh_path, exc, False)
             finally:
                 if refresh_service is not None:
                     refresh_service.close()
 
-        def _finish_refresh(self, refresh_path: str, error: Exception | None) -> None:
+        def _finish_refresh(
+            self, refresh_path: str, error: Exception | None, cancelled: bool = False
+        ) -> None:
             self.refresh_active = False
             self.refresh_path = None
+            self.refresh_cancel_event = None
+            if cancelled:
+                self._set_status(f"Refresh cancelled: {refresh_path}")
+                self.notify(f"Refresh cancelled: {refresh_path}")
+                return
             if error is not None:
                 self._set_status(f"Refresh failed: {error}")
                 self.notify(f"Refresh failed: {error}", severity="error")
@@ -936,6 +958,16 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
                 else:
                     self.notify("Filter is already cancelling.", severity="warning")
                 return
+            if self.refresh_active:
+                cancel_event = self.refresh_cancel_event
+                if cancel_event is not None and not cancel_event.is_set():
+                    cancel_event.set()
+                    self._set_status(f"Cancelling refresh: {self.refresh_path}")
+                    self.notify("Refresh cancellation requested.")
+                    return
+                if not self.delete_active:
+                    self.notify("Refresh is already cancelling.", severity="warning")
+                    return
             with self.delete_jobs_lock:
                 cancellable = [
                     job_id

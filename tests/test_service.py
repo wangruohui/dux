@@ -11,7 +11,7 @@ import sys
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from dux.service import DeleteCancelled, DuxService
+from dux.service import DeleteCancelled, DuxService, IndexCancelled
 from dux import db
 
 
@@ -238,6 +238,26 @@ class ServiceTests(unittest.TestCase):
         )
 
         self.assertEqual(reports, [2, 4])
+
+    def test_cancelled_index_does_not_replace_existing_subtree(self) -> None:
+        (self.root / "old.bin").write_bytes(b"old")
+        self.service.index_path(str(self.root))
+        (self.root / "old.bin").unlink()
+        for index in range(10):
+            (self.root / f"new-{index}.bin").write_bytes(b"new")
+
+        cancel_event = threading.Event()
+        with self.assertRaises(IndexCancelled):
+            self.service.index_path(
+                str(self.root),
+                progress=lambda _count, _path: cancel_event.set(),
+                progress_interval=1,
+                cancel_event=cancel_event,
+            )
+
+        root = db.fetch_node(self.service.conn, str(self.root))
+        self.assertIsNotNone(root)
+        self.assertEqual(int(root["file_count"]), 1)
 
     def test_delete_propagates_to_parent(self) -> None:
         sub = self.root / "sub"

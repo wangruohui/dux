@@ -91,8 +91,14 @@ class CliTests(unittest.TestCase):
                 selected_refresh_path = str(child / "selected-refresh")
                 app._selected_path = lambda: selected_refresh_path
                 app.run_worker = lambda worker, **kwargs: queued.append(worker)
-                app._refresh_current_worker = lambda refresh_path: refreshed.append(refresh_path)
+                app._refresh_current_worker = (
+                    lambda refresh_path, _cancel_event: refreshed.append(refresh_path)
+                )
                 app.action_refresh_current()
+                refresh_cancel_event = app.refresh_cancel_event
+                self.assertIsNotNone(refresh_cancel_event)
+                app.action_cancel_delete()
+                self.assertTrue(refresh_cancel_event.is_set())
                 app.current_path = str(root)
                 queued[0]()
                 self.assertEqual(refreshed, [selected_refresh_path])

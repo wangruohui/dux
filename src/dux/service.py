@@ -69,6 +69,10 @@ class FilterCancelled(RuntimeError):
     pass
 
 
+class IndexCancelled(RuntimeError):
+    pass
+
+
 class DuxService:
     def __init__(
         self,
@@ -289,8 +293,20 @@ class DuxService:
         progress: Callable[[int, str], None] | None = None,
         progress_interval: int = 10000,
         lock_status: Callable[[str], None] | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> IndexResult:
         root = self.canonical(path)
+
+        def check_cancelled() -> None:
+            if cancel_event is not None and cancel_event.is_set():
+                raise IndexCancelled(f"index cancelled: {root}")
+
+        def cancellable_lock_status(owner: str) -> None:
+            check_cancelled()
+            if lock_status is not None:
+                lock_status(owner)
+
+        check_cancelled()
         staging_path = self._create_staging_db_path()
         try:
             staging_conn = db.connect(staging_path)
@@ -302,15 +318,35 @@ class DuxService:
                         max_workers=self.max_workers,
                         progress=progress,
                         progress_interval=progress_interval,
+                        cancel_event=cancel_event,
                     )
-                    db.aggregate_subtree(staging_conn, root)
+                    check_cancelled()
+                    staging_conn.set_progress_handler(
+                        lambda: int(cancel_event is not None and cancel_event.is_set()), 1000
+                    )
+                    try:
+                        db.aggregate_subtree(staging_conn, root)
+                    except sqlite3.OperationalError as exc:
+                        if cancel_event is None or not cancel_event.is_set():
+                            raise
+                        raise IndexCancelled(f"index cancelled: {root}") from exc
+                    finally:
+                        staging_conn.set_progress_handler(None, 0)
+                    check_cancelled()
                     new_root = db.fetch_node(staging_conn, root)
                     if new_root is None:
                         raise FileNotFoundError(root)
                 staging_conn.execute("PRAGMA wal_checkpoint(FULL)")
             finally:
                 staging_conn.close()
-            self._swap_indexed_subtree(root, staging_path, new_root, lock_status=lock_status)
+            check_cancelled()
+            self._swap_indexed_subtree(
+                root,
+                staging_path,
+                new_root,
+                lock_status=cancellable_lock_status,
+                check_cancelled=check_cancelled,
+            )
         finally:
             self._remove_staging_db(staging_path)
 
@@ -333,9 +369,12 @@ class DuxService:
         staging_path: Path,
         new_root: sqlite3.Row,
         lock_status: Callable[[str], None] | None = None,
+        check_cancelled: Callable[[], None] | None = None,
     ) -> None:
         alias = "staging_index"
         attached = False
+        if check_cancelled is not None:
+            check_cancelled()
         db.attach_database(self.conn, staging_path, alias)
         attached = True
         try:
@@ -349,6 +388,8 @@ class DuxService:
                 root,
                 on_wait=lock_status,
             ):
+                if check_cancelled is not None:
+                    check_cancelled()
                 old_root = db.fetch_node(self.conn, root)
                 old_size = int(old_root["size_bytes"]) if old_root else 0
                 old_files = int(old_root["file_count"]) if old_root else 0

@@ -34,6 +34,7 @@ def scan_subtree_to_db(
     progress: ProgressCallback | None = None,
     progress_interval: int = 10000,
     batch_size: int = 5000,
+    cancel_event: threading.Event | None = None,
 ) -> ScanResult:
     started_at = time.monotonic()
     root = _canonical(root_path)
@@ -49,6 +50,9 @@ def scan_subtree_to_db(
     progress_lock = threading.Lock()
     scanned_files = 0
     scanned_dirs = 1
+
+    def cancelled() -> bool:
+        return cancel_event is not None and cancel_event.is_set()
 
     def write_records(records: list[NodeRecord]) -> None:
         if records:
@@ -105,6 +109,8 @@ def scan_subtree_to_db(
                 progress(count, path)
 
     def handle_dir(dir_path: str, dir_depth: int) -> None:
+        if cancelled():
+            return
         records: list[NodeRecord] = []
         found_files = 0
         found_dirs = 0
@@ -112,6 +118,8 @@ def scan_subtree_to_db(
         try:
             with os.scandir(dir_path) as it:
                 for entry in it:
+                    if cancelled():
+                        break
                     child_path = entry.path
                     try:
                         is_dir = entry.is_dir(follow_symlinks=False)
@@ -156,7 +164,8 @@ def scan_subtree_to_db(
                 if item is None:
                     return
                 dir_path, dir_depth = item
-                handle_dir(dir_path, dir_depth)
+                if not cancelled():
+                    handle_dir(dir_path, dir_depth)
             finally:
                 work.task_done()
 
