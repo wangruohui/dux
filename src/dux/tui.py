@@ -404,6 +404,7 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
             self.refresh_active = False
             self.refresh_path: str | None = None
             self.refresh_cancel_event: threading.Event | None = None
+            self.quit_after_refresh = False
 
         @property
         def delete_active(self) -> bool:
@@ -423,8 +424,16 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
                 self.notify("Filter is still running; wait for it to finish before quitting.", severity="warning")
                 return
             if self.refresh_active:
-                self.notify("Refresh is still running; wait for it to finish before quitting.", severity="warning")
+                self.quit_after_refresh = True
+                cancel_event = self.refresh_cancel_event
+                if cancel_event is not None:
+                    cancel_event.set()
+                self._set_status(f"Cancelling refresh before quit: {self.refresh_path}")
+                self.notify("Refresh cancellation requested; quitting when cleanup finishes.")
                 return
+            self._quit_now()
+
+        def _quit_now(self) -> None:
             self.service.close()
             self.exit()
 
@@ -628,6 +637,8 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
         ) -> None:
             refresh_service: DuxService | None = None
             started_at = time.monotonic()
+            error: Exception | None = None
+            cancelled = False
             try:
                 refresh_service = DuxService(
                     db_path=self.service.db_path,
@@ -650,14 +661,14 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
                     ),
                     cancel_event=cancel_event,
                 )
-                self.call_from_thread(self._finish_refresh, refresh_path, None, False)
             except IndexCancelled:
-                self.call_from_thread(self._finish_refresh, refresh_path, None, True)
+                cancelled = True
             except Exception as exc:
-                self.call_from_thread(self._finish_refresh, refresh_path, exc, False)
+                error = exc
             finally:
                 if refresh_service is not None:
                     refresh_service.close()
+            self.call_from_thread(self._finish_refresh, refresh_path, error, cancelled)
 
         def _finish_refresh(
             self, refresh_path: str, error: Exception | None, cancelled: bool = False
@@ -668,16 +679,18 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
             if cancelled:
                 self._set_status(f"Refresh cancelled: {refresh_path}")
                 self.notify(f"Refresh cancelled: {refresh_path}")
-                return
-            if error is not None:
+            elif error is not None:
                 self._set_status(f"Refresh failed: {error}")
                 self.notify(f"Refresh failed: {error}", severity="error")
-                return
-            self._reopen_read_service_after_write()
-            if self.current_path == refresh_path:
-                self._reload_table()
-            self._set_status(f"Background refresh finished: {refresh_path}")
-            self.notify(f"Refresh finished: {refresh_path}")
+            else:
+                self._reopen_read_service_after_write()
+                if self.current_path == refresh_path:
+                    self._reload_table()
+                self._set_status(f"Background refresh finished: {refresh_path}")
+                self.notify(f"Refresh finished: {refresh_path}")
+            if self.quit_after_refresh:
+                self.quit_after_refresh = False
+                self._quit_now()
 
         def _reopen_read_service_after_write(self) -> None:
             if not self.service.immutable_fallback:

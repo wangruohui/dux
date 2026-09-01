@@ -102,7 +102,13 @@ class CliTests(unittest.TestCase):
                 app.current_path = str(root)
                 queued[0]()
                 self.assertEqual(refreshed, [selected_refresh_path])
-                app.service.close()
+                exited = []
+                app.exit = lambda: exited.append(True)
+                app.action_request_quit()
+                self.assertTrue(app.quit_after_refresh)
+                self.assertTrue(refresh_cancel_event.is_set())
+                app._finish_refresh(selected_refresh_path, None, cancelled=True)
+                self.assertEqual(exited, [True])
             finally:
                 service.close()
 
