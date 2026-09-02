@@ -93,26 +93,53 @@ class CliTests(unittest.TestCase):
 
                 queued = []
                 refreshed = []
-                selected_refresh_path = str(child / "selected-refresh")
-                app._selected_path = lambda: selected_refresh_path
+                selected_refresh_paths = [
+                    str(child / "selected-refresh"),
+                    str(root / "other-refresh"),
+                    str(root / "other-refresh" / "overlap"),
+                ]
+                app._selected_path = lambda: selected_refresh_paths.pop(0)
                 app.run_worker = lambda worker, **kwargs: queued.append(worker)
                 app._refresh_current_worker = (
-                    lambda refresh_path, _cancel_event: refreshed.append(refresh_path)
+                    lambda job_id, refresh_path, cancel_event: refreshed.append(
+                        (job_id, refresh_path, cancel_event)
+                    )
                 )
                 app.action_refresh_current()
-                refresh_cancel_event = app.refresh_cancel_event
-                self.assertIsNotNone(refresh_cancel_event)
+                app.action_refresh_current()
+                self.assertEqual(len(queued), 2)
+                refresh_cancel_events = dict(app.refresh_cancel_events)
+                self.assertEqual(set(refresh_cancel_events), {1, 2})
+
+                app.action_refresh_current()
+                self.assertEqual(len(queued), 2)
+
                 app.action_cancel_delete()
-                self.assertTrue(refresh_cancel_event.is_set())
+                self.assertTrue(refresh_cancel_events[2].is_set())
+                self.assertFalse(refresh_cancel_events[1].is_set())
+                app.action_cancel_delete()
+                self.assertTrue(refresh_cancel_events[1].is_set())
                 app.current_path = str(root)
-                queued[0]()
-                self.assertEqual(refreshed, [selected_refresh_path])
+                for worker in queued:
+                    worker()
+                self.assertEqual(
+                    [(job_id, path) for job_id, path, _event in refreshed],
+                    [
+                        (1, str(child / "selected-refresh")),
+                        (2, str(root / "other-refresh")),
+                    ],
+                )
                 exited = []
                 app.exit = lambda: exited.append(True)
                 app.action_request_quit()
                 self.assertTrue(app.quit_after_refresh)
-                self.assertTrue(refresh_cancel_event.is_set())
-                app._finish_refresh(selected_refresh_path, None, cancelled=True)
+                app._finish_refresh(
+                    2, str(root / "other-refresh"), None, cancelled=True
+                )
+                self.assertEqual(exited, [])
+                app._finish_refresh(
+                    1, str(child / "selected-refresh"), None, cancelled=True
+                )
                 self.assertEqual(exited, [True])
             finally:
                 service.close()

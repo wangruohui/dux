@@ -79,6 +79,7 @@ class DuxService:
         db_path: str | Path | None = None,
         max_workers: int = 256,
         delete_slots: threading.BoundedSemaphore | None = None,
+        scan_slots: threading.BoundedSemaphore | None = None,
         read_only: bool = False,
     ) -> None:
         self.db_path = Path(db_path or db.DEFAULT_DB_PATH).expanduser()
@@ -101,6 +102,7 @@ class DuxService:
             self.conn = db.connect(self.db_path)
         self.max_workers = max_workers
         self.delete_slots = delete_slots or threading.BoundedSemaphore(256)
+        self.scan_slots = scan_slots
 
     def close(self) -> None:
         self.conn.close()
@@ -319,6 +321,7 @@ class DuxService:
                         progress=progress,
                         progress_interval=progress_interval,
                         cancel_event=cancel_event,
+                        scan_slots=self.scan_slots,
                     )
                     check_cancelled()
                     staging_conn.set_progress_handler(

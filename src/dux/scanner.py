@@ -35,6 +35,7 @@ def scan_subtree_to_db(
     progress_interval: int = 10000,
     batch_size: int = 5000,
     cancel_event: threading.Event | None = None,
+    scan_slots: threading.BoundedSemaphore | None = None,
 ) -> ScanResult:
     started_at = time.monotonic()
     root = _canonical(root_path)
@@ -165,7 +166,19 @@ def scan_subtree_to_db(
                     return
                 dir_path, dir_depth = item
                 if not cancelled():
-                    handle_dir(dir_path, dir_depth)
+                    acquired_slot = False
+                    try:
+                        if scan_slots is not None:
+                            while not cancelled():
+                                acquired_slot = scan_slots.acquire(timeout=0.1)
+                                if acquired_slot:
+                                    break
+                            if not acquired_slot:
+                                continue
+                        handle_dir(dir_path, dir_depth)
+                    finally:
+                        if acquired_slot:
+                            scan_slots.release()
             finally:
                 work.task_done()
 

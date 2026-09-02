@@ -6,6 +6,7 @@ import tempfile
 import threading
 import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import sys
 from unittest.mock import patch
@@ -41,6 +42,38 @@ class ServiceTests(unittest.TestCase):
         by_name = {row["name"]: row for row in rows}
         self.assertEqual(by_name["sub"]["size_bytes"], 20)
         self.assertEqual(by_name["sub"]["file_count"], 1)
+
+    def test_parallel_sibling_refreshes_keep_parent_aggregate_consistent(self) -> None:
+        alpha = self.root / "alpha"
+        beta = self.root / "beta"
+        alpha.mkdir()
+        beta.mkdir()
+        (alpha / "old.bin").write_bytes(b"a")
+        (beta / "old.bin").write_bytes(b"b")
+        self.service.index_path(str(self.root))
+        (alpha / "new.bin").write_bytes(b"aa")
+        (beta / "new.bin").write_bytes(b"bb")
+        scan_slots = threading.BoundedSemaphore(2)
+
+        def refresh(path: Path) -> None:
+            service = DuxService(
+                db_path=self.db_path,
+                max_workers=4,
+                scan_slots=scan_slots,
+            )
+            try:
+                service.index_path(str(path))
+            finally:
+                service.close()
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            list(pool.map(refresh, (alpha, beta)))
+
+        children = {row["name"]: row for row in self.service.list_children(str(self.root))}
+        root = self.service.get_node(str(self.root))
+        self.assertEqual(int(children["alpha"]["file_count"]), 2)
+        self.assertEqual(int(children["beta"]["file_count"]), 2)
+        self.assertEqual(int(root["file_count"]), 4)
 
     def test_read_only_service_falls_back_to_immutable_snapshot(self) -> None:
         (self.root / "item.bin").write_bytes(b"data")

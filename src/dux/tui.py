@@ -401,14 +401,21 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
             self.delete_jobs_lock = threading.Lock()
             self.filter_active = False
             self.filter_cancel_event: threading.Event | None = None
-            self.refresh_active = False
-            self.refresh_path: str | None = None
-            self.refresh_cancel_event: threading.Event | None = None
+            self.refresh_slots = threading.BoundedSemaphore(self.service.max_workers)
+            self.refresh_jobs: dict[int, str] = {}
+            self.refresh_job_status: dict[int, str] = {}
+            self.refresh_cancel_events: dict[int, threading.Event] = {}
+            self.next_refresh_job_id = 1
+            self.refresh_jobs_lock = threading.Lock()
             self.quit_after_refresh = False
 
         @property
         def delete_active(self) -> bool:
             return bool(self.delete_jobs)
+
+        @property
+        def refresh_active(self) -> bool:
+            return bool(self.refresh_jobs)
 
         def compose(self) -> ComposeResult:
             yield Header()
@@ -425,11 +432,13 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
                 return
             if self.refresh_active:
                 self.quit_after_refresh = True
-                cancel_event = self.refresh_cancel_event
-                if cancel_event is not None:
+                with self.refresh_jobs_lock:
+                    cancel_events = list(self.refresh_cancel_events.values())
+                    active_count = len(self.refresh_jobs)
+                for cancel_event in cancel_events:
                     cancel_event.set()
-                self._set_status(f"Cancelling refresh before quit: {self.refresh_path}")
-                self.notify("Refresh cancellation requested; quitting when cleanup finishes.")
+                self._set_status(f"Cancelling {active_count} refresh job(s) before quit...")
+                self.notify("Refresh cancellations requested; quitting when cleanup finishes.")
                 return
             self._quit_now()
 
@@ -615,25 +624,79 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
             self._navigate_to(destination, remember=False)
 
         def action_refresh_current(self) -> None:
-            if self.refresh_active:
-                self.notify(f"Refresh already running: {self.refresh_path}", severity="warning")
+            if self.quit_after_refresh:
+                self.notify("Quit is pending; refresh jobs are being cancelled.", severity="warning")
                 return
             refresh_path = self._selected_path()
             if refresh_path is None:
                 self.notify("Select a file or directory to refresh.", severity="warning")
                 return
-            self.refresh_active = True
-            self.refresh_path = refresh_path
             cancel_event = threading.Event()
-            self.refresh_cancel_event = cancel_event
-            self._set_status(f"Background refresh started: {refresh_path}")
-            self.notify(f"Refreshing {refresh_path} in the background")
+            with self.refresh_jobs_lock:
+                conflict = next(
+                    (
+                        active_path
+                        for active_path in self.refresh_jobs.values()
+                        if self._refresh_paths_overlap(refresh_path, active_path)
+                    ),
+                    None,
+                )
+                if conflict is not None:
+                    self.notify(
+                        f"Overlapping refresh already running: {conflict}", severity="warning"
+                    )
+                    return
+                job_id = self.next_refresh_job_id
+                self.next_refresh_job_id += 1
+                self.refresh_jobs[job_id] = refresh_path
+                self.refresh_job_status[job_id] = "starting"
+                self.refresh_cancel_events[job_id] = cancel_event
+            self._render_refresh_status()
+            self.notify(f"Refresh job {job_id} started: {refresh_path}")
             self.run_worker(
-                lambda: self._refresh_current_worker(refresh_path, cancel_event), thread=True
+                lambda: self._refresh_current_worker(job_id, refresh_path, cancel_event), thread=True
             )
 
+        @staticmethod
+        def _refresh_paths_overlap(first: str, second: str) -> bool:
+            if first == second:
+                return True
+            first_prefix = first.rstrip("/") + "/"
+            second_prefix = second.rstrip("/") + "/"
+            return first.startswith(second_prefix) or second.startswith(first_prefix)
+
+        def _set_refresh_job_status(self, job_id: int, message: str) -> None:
+            with self.refresh_jobs_lock:
+                if job_id not in self.refresh_jobs:
+                    return
+                self.refresh_job_status[job_id] = message
+            self._render_refresh_status()
+
+        def _render_refresh_status(self) -> bool:
+            with self.refresh_jobs_lock:
+                if not self.refresh_jobs:
+                    return False
+                cancellable = [
+                    job_id
+                    for job_id, cancel_event in self.refresh_cancel_events.items()
+                    if not cancel_event.is_set()
+                ]
+                focus_job_id = max(cancellable) if cancellable else max(self.refresh_jobs)
+                active_count = len(self.refresh_jobs)
+                cancelling_count = sum(
+                    cancel_event.is_set() for cancel_event in self.refresh_cancel_events.values()
+                )
+                path = self.refresh_jobs[focus_job_id]
+                message = self.refresh_job_status[focus_job_id]
+            cancelling = f" cancelling={cancelling_count}" if cancelling_count else ""
+            self._set_status(
+                f"Refresh jobs={active_count}{cancelling} | job {focus_job_id}: "
+                f"{message} | {path}"
+            )
+            return True
+
         def _refresh_current_worker(
-            self, refresh_path: str, cancel_event: threading.Event
+            self, job_id: int, refresh_path: str, cancel_event: threading.Event
         ) -> None:
             refresh_service: DuxService | None = None
             started_at = time.monotonic()
@@ -643,13 +706,15 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
                 refresh_service = DuxService(
                     db_path=self.service.db_path,
                     max_workers=self.service.max_workers,
+                    scan_slots=self.refresh_slots,
                 )
                 refresh_service.index_path(
                     refresh_path,
                     progress=lambda count, current: (
                         self.call_from_thread(
-                            self._set_status,
-                            f"Refreshing {refresh_path}: {count} entries "
+                            self._set_refresh_job_status,
+                            job_id,
+                            f"{count} entries "
                             f"({count / max(time.monotonic() - started_at, 0.001):.0f}/s) "
                             f"current={current}",
                         )
@@ -657,7 +722,9 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
                         else None
                     ),
                     lock_status=lambda owner: self.call_from_thread(
-                        self._set_status, f"Refresh waiting for database writer: {owner}"
+                        self._set_refresh_job_status,
+                        job_id,
+                        f"waiting for database writer: {owner}",
                     ),
                     cancel_event=cancel_event,
                 )
@@ -668,27 +735,39 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
             finally:
                 if refresh_service is not None:
                     refresh_service.close()
-            self.call_from_thread(self._finish_refresh, refresh_path, error, cancelled)
+            self.call_from_thread(
+                self._finish_refresh, job_id, refresh_path, error, cancelled
+            )
 
         def _finish_refresh(
-            self, refresh_path: str, error: Exception | None, cancelled: bool = False
+            self,
+            job_id: int,
+            refresh_path: str,
+            error: Exception | None,
+            cancelled: bool = False,
         ) -> None:
-            self.refresh_active = False
-            self.refresh_path = None
-            self.refresh_cancel_event = None
+            with self.refresh_jobs_lock:
+                self.refresh_jobs.pop(job_id, None)
+                self.refresh_job_status.pop(job_id, None)
+                self.refresh_cancel_events.pop(job_id, None)
+                remaining_jobs = len(self.refresh_jobs)
             if cancelled:
-                self._set_status(f"Refresh cancelled: {refresh_path}")
-                self.notify(f"Refresh cancelled: {refresh_path}")
+                outcome = f"Refresh job {job_id} cancelled: {refresh_path}"
+                self.notify(outcome)
             elif error is not None:
-                self._set_status(f"Refresh failed: {error}")
-                self.notify(f"Refresh failed: {error}", severity="error")
+                outcome = f"Refresh job {job_id} failed: {refresh_path}: {error}"
+                self.notify(outcome, severity="error")
             else:
                 self._reopen_read_service_after_write()
-                if self.current_path == refresh_path:
+                if self.current_path in {refresh_path, str(Path(refresh_path).parent)}:
                     self._reload_table()
-                self._set_status(f"Background refresh finished: {refresh_path}")
-                self.notify(f"Refresh finished: {refresh_path}")
-            if self.quit_after_refresh:
+                outcome = f"Refresh job {job_id} finished: {refresh_path}"
+                self.notify(outcome)
+            if remaining_jobs:
+                self._render_refresh_status()
+            else:
+                self._set_status(outcome)
+            if self.quit_after_refresh and not remaining_jobs:
                 self.quit_after_refresh = False
                 self._quit_now()
 
@@ -972,14 +1051,23 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
                     self.notify("Filter is already cancelling.", severity="warning")
                 return
             if self.refresh_active:
-                cancel_event = self.refresh_cancel_event
-                if cancel_event is not None and not cancel_event.is_set():
-                    cancel_event.set()
-                    self._set_status(f"Cancelling refresh: {self.refresh_path}")
-                    self.notify("Refresh cancellation requested.")
+                with self.refresh_jobs_lock:
+                    cancellable = [
+                        job_id
+                        for job_id, cancel_event in self.refresh_cancel_events.items()
+                        if not cancel_event.is_set()
+                    ]
+                    job_id = max(cancellable) if cancellable else None
+                    if job_id is not None:
+                        self.refresh_cancel_events[job_id].set()
+                        self.refresh_job_status[job_id] = "cancel requested"
+                        refresh_path = self.refresh_jobs[job_id]
+                if job_id is not None:
+                    self._render_refresh_status()
+                    self.notify(f"Cancellation requested for refresh job {job_id}: {refresh_path}")
                     return
                 if not self.delete_active:
-                    self.notify("Refresh is already cancelling.", severity="warning")
+                    self.notify("All refresh jobs are already cancelling.", severity="warning")
                     return
             with self.delete_jobs_lock:
                 cancellable = [

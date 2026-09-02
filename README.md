@@ -31,8 +31,8 @@ s size  c count  m date  n name  r refresh  f filter  x cancel filter/refresh/de
 
 ## Latest Features / 最新功能
 
-- **Refresh what you are looking at**: press `r` to rescan the item under the cursor in the background while the UI stays responsive; the completed subtree is merged through a short SQLite transaction.
-- **刷新光标所在内容**：按 `r` 即可在后台重新统计光标所在项目，UI 保持可操作；完成后的子树通过短 SQLite 事务合并。
+- **Refresh what you are looking at**: press `r` to rescan items under the cursor in parallel while the UI stays responsive. Refreshes share the configured scan concurrency; completed subtrees are merged through short serialized SQLite transactions.
+- **刷新光标所在内容**：按 `r` 可并行重新统计多个光标项目，UI 保持可操作。refresh 任务共享配置的扫描并发，完成后的子树通过串行短 SQLite 事务合并。
 - **Live-first recursive filter**: press `f` to search the current tree with shell globs and optional exclude pruning. Live filesystem results are combined with indexed size, file count, and date metadata without walking stale database paths.
 - **实时优先递归筛选**：按 `f` 使用 shell 通配符检索当前子树，并可通过 exclude 剪枝；实时文件系统结果会与索引中的大小、文件数和日期合并，同时避免遍历 stale 数据库路径。
 - **Index-consistent deletion**: completed deletes remove the entire indexed path prefix and recompute every ancestor aggregate, even if the deleted root row was already missing.
@@ -160,8 +160,8 @@ dux --workers 16 index /data/project
 - `r`：在后台刷新当前光标所在的路径；扫描写入 staging 数据库，完成后用一个短事务合并。
 - `f`: recursively find file/directory basenames using shell globs such as `a*`, with optional exclude-path pruning; it remains available while deletion runs.
 - `f`：在当前目录下递归使用 `a*` 等 shell 通配符匹配文件或目录 basename，可填写 exclude 关键字剪枝；删除期间仍可使用。
-- `x`: cancel an active filter first, then an active background refresh, otherwise the latest delete job that has not received a cancellation request. Press repeatedly to cancel remaining delete jobs one by one. A cancelled refresh discards its staging database without changing the committed index; completed filesystem deletions are flushed to SQLite before delete cancellation finishes.
-- `x`：优先取消正在运行的筛选，其次取消后台刷新，否则取消最近启动且尚未请求取消的删除任务；重复按下可依次取消其余删除任务。刷新取消后会丢弃 staging 数据库，不改变已提交索引；删除取消完成前，已经删除的文件和目录会同步写入 SQLite。
+- `x`: cancel an active filter first, then the latest refresh, otherwise the latest delete job that has not received a cancellation request. Press repeatedly to cancel remaining jobs one by one. A cancelled refresh discards its staging database without changing the committed index; completed filesystem deletions are flushed to SQLite before delete cancellation finishes.
+- `x`：优先取消正在运行的筛选，其次取消最近启动的 refresh，否则取消最近启动且尚未请求取消的删除任务；重复按下可依次取消其余任务。refresh 取消后会丢弃 staging 数据库，不改变已提交索引；删除取消完成前，已经删除的文件和目录会同步写入 SQLite。
 - `s`: sort by size.
 - `s`：按大小排序。
 - `c`: sort by recursive file count.
@@ -170,8 +170,8 @@ dux --workers 16 index /data/project
 - `m`：按修改时间排序。
 - `n`: sort by name.
 - `n`：按名称排序。
-- `q`: quit. If a background refresh is active, `dux` cancels it, discards the staging database, and exits after worker cleanup finishes. Active filter and delete jobs still block quitting.
-- `q`：退出。如果后台刷新正在运行，`dux` 会先取消刷新、丢弃 staging 数据库，并在 worker 清理完成后安全退出；filter 和删除任务仍会阻止退出。
+- `q`: quit. If background refreshes are active, `dux` cancels all of them, discards their staging databases, and exits after every worker finishes cleanup. Active filter and delete jobs still block quitting.
+- `q`：退出。如果存在后台 refresh，`dux` 会全部取消、丢弃各自的 staging 数据库，并在所有 worker 清理完成后安全退出；filter 和删除任务仍会阻止退出。
 - Mouse input is reserved for the terminal client: the TUI does not capture clicks, scrolling, or dragging, so normal mouse selection and copy work without holding `Shift`.
 - 鼠标输入完全交还终端客户端：TUI 不捕获点击、滚轮或拖拽，因此无需按住 `Shift` 即可正常选择和复制文字。
 
