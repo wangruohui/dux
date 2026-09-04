@@ -123,6 +123,8 @@ def scan_subtree_to_db(
                         break
                     child_path = entry.path
                     try:
+                        if entry.is_symlink():
+                            continue
                         is_dir = entry.is_dir(follow_symlinks=False)
                         size_bytes = (
                             0 if is_dir else int(entry.stat(follow_symlinks=False).st_size)

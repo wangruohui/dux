@@ -156,9 +156,14 @@ class DuxService:
                     if stop_event.is_set() or cancelled():
                         stop_event.set()
                         return
+                    try:
+                        if entry.is_symlink():
+                            continue
+                        is_dir = entry.is_dir(follow_symlinks=False)
+                    except OSError:
+                        continue
                     if exclude and exclude in os.path.relpath(entry.path, root):
                         continue
-                    is_dir = entry.is_dir(follow_symlinks=False)
                     if fnmatch.fnmatchcase(entry.name, keyword):
                         with matches_lock:
                             matches[entry.path] = is_dir
@@ -735,6 +740,11 @@ class DuxService:
         try:
             with os.scandir(root) as entries:
                 for entry in entries:
+                    try:
+                        if entry.is_symlink():
+                            continue
+                    except OSError:
+                        continue
                     if seen_live >= live_limit:
                         truncated = True
                         break

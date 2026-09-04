@@ -46,6 +46,8 @@ s size  c count  m date  n name  r refresh  f filter  x cancel filter/refresh/de
 
 - **Multi-threaded indexing**: scans directory trees with worker threads and stores aggregate metadata in SQLite.
 - **多线程统计**：使用 worker 线程遍历目录树，把聚合后的大小、文件数、目录数写入 SQLite。
+- **Symlink-safe boundaries**: indexing, live UI discovery, and recursive filtering skip symbolic links entirely without counting, matching, or following them.
+- **安全跳过符号链接**：索引、UI 实时发现和递归筛选都会完全跳过 symlink，不计数、不匹配，也不跟随目标。
 - **Terminal UI**: browse large trees over SSH without a desktop environment.
 - **终端可视化**：纯命令行 UI，适合 SSH 和服务器环境。
 - **Sort by the metric that matters**: size, recursive file count, modification time, or name, in either direction.

@@ -75,6 +75,26 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(int(children["beta"]["file_count"]), 2)
         self.assertEqual(int(root["file_count"]), 4)
 
+    def test_index_filter_and_live_listing_skip_symlinks(self) -> None:
+        outside = Path(self.tmp.name) / "outside"
+        outside.mkdir()
+        (outside / "secret-target").write_bytes(b"outside-data")
+        (self.root / "regular.bin").write_bytes(b"regular")
+        (self.root / "linked-file-target").symlink_to(outside / "secret-target")
+        (self.root / "linked-dir-target").symlink_to(outside, target_is_directory=True)
+
+        self.service.index_path(str(self.root))
+
+        root = self.service.get_node(str(self.root))
+        indexed_names = {row["name"] for row in self.service.list_children(str(self.root))}
+        filtered = self.service.filter_paths(str(self.root), "*target")
+        visible, _ = self.service.list_visible_children(str(self.root), sort_by="name")
+        self.assertEqual(int(root["size_bytes"]), len(b"regular"))
+        self.assertEqual(int(root["file_count"]), 1)
+        self.assertEqual(indexed_names, {"regular.bin"})
+        self.assertEqual(filtered.paths, [])
+        self.assertEqual({row["name"] for row in visible}, {"regular.bin"})
+
     def test_read_only_service_falls_back_to_immutable_snapshot(self) -> None:
         (self.root / "item.bin").write_bytes(b"data")
         self.service.index_path(str(self.root))
