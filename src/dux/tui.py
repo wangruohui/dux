@@ -103,7 +103,7 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
             self.dismiss(False)
 
     class FilePreviewScreen(ModalScreen[None]):
-        BINDINGS = [Binding("q", "close_preview", "Close", priority=True)]
+        BINDINGS = [Binding("backspace", "close_preview", "Parent", priority=True)]
 
         def __init__(self, path: str, content: str, byte_count: int, truncated: bool) -> None:
             super().__init__()
@@ -121,7 +121,7 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
                     Static(self.content, id="preview-content", markup=False),
                     id="preview-scroll",
                 ),
-                Label("Esc/q: close preview"),
+                Label("Backspace/Esc: return to directory"),
                 id="preview-dialog",
             )
 
