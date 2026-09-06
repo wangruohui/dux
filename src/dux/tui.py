@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import stat
 import threading
 import time
 from pathlib import Path
@@ -48,7 +50,7 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
     try:
         from textual.app import App, ComposeResult
         from textual.binding import Binding
-        from textual.containers import Container
+        from textual.containers import Container, VerticalScroll
         from textual.screen import ModalScreen
         from textual.widgets import DataTable, Footer, Header, Input, Label, Static
         from rich.text import Text
@@ -96,6 +98,36 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
 
         def key_escape(self) -> None:
             self.dismiss(False)
+
+    class FilePreviewScreen(ModalScreen[None]):
+        def __init__(self, path: str, content: str, byte_count: int, truncated: bool) -> None:
+            super().__init__()
+            self.path = path
+            self.content = content
+            self.byte_count = byte_count
+            self.truncated = truncated
+
+        def compose(self) -> ComposeResult:
+            suffix = " (truncated at 1 KiB)" if self.truncated else ""
+            yield Container(
+                Static(self.path, classes="dialog-title", markup=False),
+                Static(f"Showing {self.byte_count} byte(s){suffix}"),
+                VerticalScroll(
+                    Static(self.content, id="preview-content", markup=False),
+                    id="preview-scroll",
+                ),
+                Label("Esc/q: close preview"),
+                id="preview-dialog",
+            )
+
+        def on_mount(self) -> None:
+            self.query_one("#preview-scroll", VerticalScroll).focus()
+
+        def key_escape(self) -> None:
+            self.dismiss(None)
+
+        def key_q(self) -> None:
+            self.dismiss(None)
 
     class FilterQueryScreen(ModalScreen[tuple[str, str] | None]):
         def compose(self) -> ComposeResult:
@@ -341,6 +373,20 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
             background: #16212d;
             border: round #7dd3fc;
             padding: 1 2;
+        }
+        #preview-dialog {
+            width: 94%;
+            height: 86%;
+            background: #16212d;
+            border: round #7dd3fc;
+            padding: 1 2;
+        }
+        #preview-scroll {
+            height: 1fr;
+            margin: 1 0;
+        }
+        #preview-content {
+            width: 1fr;
         }
         .dialog-title {
             color: #7dd3fc;
@@ -588,6 +634,37 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
                 return
             if self.rows_by_key.get(selected):
                 self._navigate_to(selected)
+                return
+            descriptor: int | None = None
+            try:
+                path = Path(selected)
+                if path.is_symlink():
+                    self.notify("Symlink previews are disabled.", severity="warning")
+                    return
+                descriptor = os.open(
+                    selected, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW
+                )
+                if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                    self.notify("Only regular files can be previewed.", severity="warning")
+                    return
+                data = os.read(descriptor, 1025)
+            except OSError as exc:
+                self.notify(f"Unable to preview {selected}: {exc}", severity="error")
+                return
+            finally:
+                if descriptor is not None:
+                    os.close(descriptor)
+            preview = data[:1024]
+            text = preview.decode("utf-8", errors="replace")
+            safe_text = "".join(
+                character
+                if character in "\n\r\t" or character.isprintable()
+                else f"\\x{ord(character):02x}"
+                for character in text
+            )
+            self.push_screen(
+                FilePreviewScreen(selected, safe_text, len(preview), len(data) > 1024)
+            )
 
         def _navigate_to(self, destination: str, *, remember: bool = True) -> None:
             destination = self.service.canonical(destination)

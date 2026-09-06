@@ -91,6 +91,20 @@ class CliTests(unittest.TestCase):
                 app.action_sort_mtime()
                 self.assertFalse(app.reverse)
 
+                preview_file = root / "preview.txt"
+                preview_file.write_bytes((b"A" * 1024) + b"B")
+                pushed_screens = []
+                app._selected_path = lambda: str(preview_file)
+                app.rows_by_key[str(preview_file)] = False
+                app.push_screen = lambda screen, *args, **kwargs: pushed_screens.append(screen)
+                app.action_open_selected()
+                self.assertEqual(len(pushed_screens), 1)
+                preview_screen = pushed_screens[0]
+                self.assertEqual(preview_screen.path, str(preview_file))
+                self.assertEqual(preview_screen.byte_count, 1024)
+                self.assertTrue(preview_screen.truncated)
+                self.assertEqual(preview_screen.content, "A" * 1024)
+
                 queued = []
                 refreshed = []
                 selected_refresh_paths = [
@@ -215,6 +229,20 @@ class CliTests(unittest.TestCase):
                         self.assertEqual(app.current_path, selected)
                         await pilot.press("alt+right")
                         self.assertEqual(app.current_path, str(root))
+
+                        preview_file = root / "preview.txt"
+                        preview_file.write_bytes((b"A" * 1024) + b"B")
+                        app._selected_path = lambda: str(preview_file)
+                        app.rows_by_key[str(preview_file)] = False
+                        main_screen = app.screen
+                        await pilot.press("enter")
+                        await pilot.pause()
+                        self.assertEqual(app.screen.path, str(preview_file))
+                        self.assertEqual(app.screen.byte_count, 1024)
+                        self.assertTrue(app.screen.truncated)
+                        await pilot.press("escape")
+                        await pilot.pause()
+                        self.assertIs(app.screen, main_screen)
 
                 asyncio.run(exercise_keys())
                 app.service.close()

@@ -17,7 +17,7 @@ Path: /data/project                         Sort: size
 │   9.7G   │    14,006 │ 2026-06-22 │ tmp/                         │ [                ] │
 └──────────┴───────────┴────────────┴──────────────────────────────┴────────────────────┘
 
-Enter open  Backspace parent  Alt+Left/Right history  Space select  Del/Shift+Del delete
+Enter open/preview  Backspace parent  Alt+Left/Right history  Space select  Del/Shift+Del delete
 s size  c count  m date  n name  r refresh  f filter  x cancel filter/refresh/delete  q quit
 ```
 
@@ -146,8 +146,8 @@ dux --workers 16 index /data/project
 
 ## UI Controls / UI 快捷键
 
-- `Enter` / `Right`: open selected directory.
-- `Enter` / `Right`：进入当前目录。
+- `Enter` / `Right`: open the selected directory, or show a read-only preview of the first 1 KiB when the selected item is a file. Press `Esc` or `q` to close the preview.
+- `Enter` / `Right`：进入选中的目录；如果选中的是文件，则只读预览前 1 KiB 内容。按 `Esc` 或 `q` 关闭预览。
 - `Up` / `Down`: move the row cursor.
 - `Up` / `Down`：移动表格行光标。
 - `Backspace`: go to the current directory's parent.
