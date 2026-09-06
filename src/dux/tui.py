@@ -103,6 +103,8 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
             self.dismiss(False)
 
     class FilePreviewScreen(ModalScreen[None]):
+        BINDINGS = [Binding("q", "close_preview", "Close", priority=True)]
+
         def __init__(self, path: str, content: str, byte_count: int, truncated: bool) -> None:
             super().__init__()
             self.path = path
@@ -129,7 +131,7 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
         def key_escape(self) -> None:
             self.dismiss(None)
 
-        def key_q(self) -> None:
+        def action_close_preview(self) -> None:
             self.dismiss(None)
 
     class FilterQueryScreen(ModalScreen[tuple[str, str] | None]):

@@ -318,7 +318,7 @@ class CliTests(unittest.TestCase):
                         self.assertEqual(app.screen.path, str(preview_file))
                         self.assertEqual(app.screen.byte_count, 1024)
                         self.assertTrue(app.screen.truncated)
-                        await pilot.press("escape")
+                        await pilot.press("q")
                         await pilot.pause()
                         self.assertIs(app.screen, main_screen)
 
