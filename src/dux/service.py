@@ -162,7 +162,7 @@ class DuxService:
                         is_dir = entry.is_dir(follow_symlinks=False)
                     except OSError:
                         continue
-                    if exclude and exclude in os.path.relpath(entry.path, root):
+                    if exclude and exclude in os.path.abspath(entry.path):
                         continue
                     if fnmatch.fnmatchcase(entry.name, keyword):
                         with matches_lock:

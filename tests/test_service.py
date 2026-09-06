@@ -633,6 +633,18 @@ class ServiceTests(unittest.TestCase):
         self.assertGreaterEqual(result.scanned_dirs, 3)
         self.assertTrue(progress)
 
+    def test_filter_paths_excludes_against_full_absolute_path(self) -> None:
+        search_root = self.root / "excluded-parent" / "scan-root"
+        match = search_root / "output" / "target"
+        match.parent.mkdir(parents=True)
+        match.write_bytes(b"data")
+
+        result = self.service.filter_paths(
+            str(search_root), "target", exclude="excluded-parent"
+        )
+
+        self.assertEqual(result.paths, [])
+
     def test_filter_paths_rejects_empty_keyword(self) -> None:
         with self.assertRaisesRegex(ValueError, "must not be empty"):
             self.service.filter_paths(str(self.root), "")
