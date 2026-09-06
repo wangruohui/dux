@@ -119,7 +119,9 @@ class DuxService:
         progress_interval: int = 100,
         cancel_event: threading.Event | None = None,
     ) -> FilterResult:
-        if not keyword:
+        patterns = tuple(part.strip() for part in keyword.split("|") if part.strip())
+        exclude_terms = tuple(part.strip() for part in exclude.split("|") if part.strip())
+        if not patterns:
             raise ValueError("filter keyword must not be empty")
 
         root = self.canonical(path)
@@ -162,9 +164,10 @@ class DuxService:
                         is_dir = entry.is_dir(follow_symlinks=False)
                     except OSError:
                         continue
-                    if exclude and exclude in os.path.abspath(entry.path):
+                    full_path = os.path.abspath(entry.path)
+                    if any(term in full_path for term in exclude_terms):
                         continue
-                    if fnmatch.fnmatchcase(entry.name, keyword):
+                    if any(fnmatch.fnmatchcase(entry.name, pattern) for pattern in patterns):
                         with matches_lock:
                             matches[entry.path] = is_dir
                         continue

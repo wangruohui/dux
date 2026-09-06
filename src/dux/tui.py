@@ -139,9 +139,9 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
             yield Container(
                 Static("Recursive filter from the current directory", classes="dialog-title"),
                 Label("Name pattern to find"),
-                Input(placeholder="required basename glob, e.g. a*", id="filter-keyword"),
+                Input(placeholder="basename glob(s), e.g. a*|b*", id="filter-keyword"),
                 Label("Exclude paths containing"),
-                Input(placeholder="optional; matching directories are pruned", id="filter-exclude"),
+                Input(placeholder="optional terms separated by |; matching dirs are pruned", id="filter-exclude"),
                 Label("Enter: next/start    Esc: cancel"),
                 id="filter-dialog",
             )

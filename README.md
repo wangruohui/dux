@@ -191,13 +191,13 @@ During deletion, the status line reports the active phase. File removal shows a 
 
 删除过程中，状态栏会显示当前阶段。文件删除阶段会显示进度条、已处理条目数、吞吐、ETA 和当前路径。成功删除的条目会持续投递给 SQLite writer；目标完整删除后还会无条件按路径前缀清理整棵索引并重新计算所有父级，即使目标根节点已经缺失也不会留下 orphan 行。取消时不会重新扫描目标。
 
-Filter matching is case-sensitive and applies a shell glob to each entry's basename only; `/` is not part of the match. For example, `a*` matches names beginning with `a`. Filter scans the live filesystem first, then batch-fetches SQLite metadata only for the final live matches. Stale database paths are ignored without enumerating or `stat`-ing them, while live-only paths remain visible. When a directory matches, it is returned and its descendants are not scanned, following `find ... -prune` semantics. If the full absolute path contains the exclude keyword, that entry is skipped; excluded directories are not entered.
+Filter matching is case-sensitive and applies shell globs to each entry's basename only; `/` is not part of the match. Separate alternatives with `|`: for example, `a*|report-*` includes a name when either glob matches. Filter scans the live filesystem first, then batch-fetches SQLite metadata only for the final live matches. Stale database paths are ignored without enumerating or `stat`-ing them, while live-only paths remain visible. When a directory matches, it is returned and its descendants are not scanned, following `find ... -prune` semantics. Exclude also accepts `|`-separated alternatives; if the full absolute path contains any exclude term, that entry is skipped and excluded directories are not entered.
 
 Press `x` while filtering to stop the active search. The status line changes to `Cancelling filter...` until all scanner workers exit; partial matches are discarded. When no filter is active, `x` keeps its existing behavior of cancelling the latest delete job.
 
 The filter selection table uses the same metadata columns as normal browsing: size, recursive file count, date, and name. Press `s`, `c`, or `m` to sort by size, file count, or date; press the same key again to reverse the direction. Unindexed matches stay last. Indexed matches show database aggregates; live-only matches are labeled `unindexed`.
 
-筛选只对每个条目的 basename 做大小写敏感的 shell 通配符匹配，不涉及 `/`；例如 `a*` 匹配所有以 `a` 开头的名称。Filter 会先扫描实时文件系统，再只为最终仍存在的命中路径批量读取 SQLite 元数据；数据库中的 stale 路径无需枚举或逐条 `stat` 即可忽略，live-only 路径仍会正常显示。目录命中后返回该目录且不再扫描其子目录，语义与 `find ... -prune` 一致。完整绝对路径包含 exclude 关键字的条目会被跳过，其中目录不会继续进入。
+筛选只对每个条目的 basename 做大小写敏感的 shell 通配符匹配，不涉及 `/`。可用 `|` 分隔多个“或”模式，例如 `a*|report-*`，任一 glob 命中即包含。Filter 会先扫描实时文件系统，再只为最终仍存在的命中路径批量读取 SQLite 元数据；数据库中的 stale 路径无需枚举或逐条 `stat` 即可忽略，live-only 路径仍会正常显示。目录命中后返回该目录且不再扫描其子目录，语义与 `find ... -prune` 一致。Exclude 同样支持用 `|` 分隔多个关键词；完整绝对路径包含其中任意关键词时跳过该条目，目录不会继续进入。
 
 筛选过程中按 `x` 可停止当前检索；状态栏会显示 `Cancelling filter...`，直到 scanner worker 全部退出，已产生的部分结果不会进入选择表。没有 filter 运行时，`x` 仍用于取消最近一次删除任务。
 

@@ -645,9 +645,31 @@ class ServiceTests(unittest.TestCase):
 
         self.assertEqual(result.paths, [])
 
+    def test_filter_paths_supports_or_patterns_and_excludes(self) -> None:
+        keep = self.root / "keep"
+        excluded_nrs = self.root / "run-nrs" / "apple"
+        excluded_cache = self.root / "cache" / "pear"
+        keep.mkdir()
+        excluded_nrs.parent.mkdir()
+        excluded_cache.parent.mkdir()
+        (keep / "apple").write_bytes(b"a")
+        (keep / "pear").write_bytes(b"p")
+        (keep / "berry").write_bytes(b"b")
+        excluded_nrs.write_bytes(b"n")
+        excluded_cache.write_bytes(b"c")
+
+        result = self.service.filter_paths(
+            str(self.root), "a* | pear", exclude="nrs | cache"
+        )
+
+        self.assertEqual(result.paths, [str(keep / "apple"), str(keep / "pear")])
+
     def test_filter_paths_rejects_empty_keyword(self) -> None:
         with self.assertRaisesRegex(ValueError, "must not be empty"):
             self.service.filter_paths(str(self.root), "")
+
+        with self.assertRaisesRegex(ValueError, "must not be empty"):
+            self.service.filter_paths(str(self.root), " | ")
 
     def test_filter_paths_supports_basename_globs(self) -> None:
         (self.root / "alpha").mkdir()
