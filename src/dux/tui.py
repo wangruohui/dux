@@ -74,9 +74,12 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
             elif event.key == "space":
                 event.stop()
                 self.app.action_toggle_select()
-            elif event.key in {"delete", "shift+delete"}:
+            elif event.key == "delete":
                 event.stop()
-                self.app.action_delete_requested()
+                self.app.action_trash_requested()
+            elif event.key == "shift+delete":
+                event.stop()
+                self.app.action_permanent_delete_requested()
 
     class ConfirmScreen(ModalScreen[bool]):
         def __init__(self, message: str) -> None:
@@ -85,7 +88,7 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
 
         def compose(self) -> ComposeResult:
             yield Container(
-                Static(self.message, id="message"),
+                Static(self.message, id="message", markup=False),
                 Label("Press y to confirm, n or Esc to cancel"),
                 id="dialog",
             )
@@ -167,9 +170,12 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
             elif event.key == "a":
                 event.stop()
                 self.screen.action_toggle_all_results()
-            elif event.key == "enter":
+            elif event.key in {"enter", "delete"}:
                 event.stop()
-                self.screen.action_accept_results()
+                self.screen.action_accept_results(permanent=False)
+            elif event.key == "shift+delete":
+                event.stop()
+                self.screen.action_accept_results(permanent=True)
             elif event.key in {"s", "c", "m"}:
                 event.stop()
                 self.screen.action_sort_results(
@@ -179,7 +185,7 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
                 event.stop()
                 self.screen.dismiss(None)
 
-    class FilterResultsScreen(ModalScreen[list[str] | None]):
+    class FilterResultsScreen(ModalScreen[tuple[list[str], bool, dict[str, str]] | None]):
         def __init__(self, root: str, entries: list[FilterEntry]) -> None:
             super().__init__()
             self.root = root
@@ -196,7 +202,7 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
                 Static(f"Filter results under {self.root}", classes="dialog-title"),
                 Static(
                     "s: size    c: files    m: date    Space: select    "
-                    "a: all/none    Enter: delete selected    Esc/q: cancel"
+                    "a: all/none    Enter/Del: trash    Shift+Del: permanent    Esc/q: cancel"
                 ),
                 Static(f"0/{len(self.paths)} selected", id="filter-result-status"),
                 FilterResultsTable(id="filter-results"),
@@ -326,24 +332,21 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
                 self._update_result(path)
             self._update_status()
 
-        def action_accept_results(self) -> None:
+        def action_accept_results(self, permanent: bool = False) -> None:
             if not self.selected_paths:
                 self.app.notify("Select at least one filter result.", severity="warning")
                 return
             selected = sorted(self.selected_paths)
-            preview = "\n".join(selected[:20])
-            suffix = "" if len(selected) <= 20 else f"\n... and {len(selected) - 20} more"
-            message = (
-                f"Permanently delete {len(selected)} filtered item(s)?\n"
-                f"{preview}{suffix}\n\n"
-                "Press y to confirm, n or Esc to return to selection."
+
+            def confirmed(destinations: dict[str, str]) -> None:
+                self.dismiss((selected, permanent, destinations))
+
+            self.app._confirm_delete(
+                selected,
+                permanent=permanent,
+                target_text="filtered item(s)",
+                confirmed=confirmed,
             )
-
-            def after_confirm(confirm: bool) -> None:
-                if confirm:
-                    self.dismiss(selected)
-
-            self.app.push_screen(ConfirmScreen(message), after_confirm)
 
     class DuxApp(App[None]):
         CSS = """
@@ -420,8 +423,8 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
             Binding("f", "filter_paths", "Filter"),
             Binding("x", "cancel_delete", "Cancel Active"),
             Binding("space", "toggle_select", "Select"),
-            Binding("delete", "delete_requested", "Delete"),
-            Binding("shift+delete", "delete_requested", "Delete"),
+            Binding("delete", "trash_requested", "Trash"),
+            Binding("shift+delete", "permanent_delete_requested", "Delete"),
             Binding("s", "sort_size", "Sort Size"),
             Binding("c", "sort_count", "Sort Count"),
             Binding("m", "sort_mtime", "Sort Date"),
@@ -996,10 +999,18 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
                 )
                 return
 
-            def after_results(selected: list[str] | None) -> None:
-                if not selected:
+            def after_results(
+                result: tuple[list[str], bool, dict[str, str]] | None,
+            ) -> None:
+                if not result:
                     return
-                self._start_delete(selected, permanent=True, trash=False)
+                selected, permanent, destinations = result
+                self._start_delete(
+                    selected,
+                    permanent=permanent,
+                    trash=not permanent,
+                    trash_destinations=destinations,
+                )
 
             self.push_screen(FilterResultsScreen(root, entries), after_results)
 
@@ -1024,7 +1035,13 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
         def action_sort_name(self) -> None:
             self._apply_sort("name")
 
-        def action_delete_requested(self) -> None:
+        def action_trash_requested(self) -> None:
+            self._request_delete(permanent=False)
+
+        def action_permanent_delete_requested(self) -> None:
+            self._request_delete(permanent=True)
+
+        def _request_delete(self, *, permanent: bool) -> None:
             targets = self._marked_delete_roots()
             deleting_marked = bool(targets)
             if not targets:
@@ -1033,23 +1050,67 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
                     targets = [selected]
             if not targets:
                 return
-            preview = "\n".join(targets[:20])
-            suffix = "" if len(targets) <= 20 else f"\n... and {len(targets) - 20} more"
             target_text = "selected item(s)" if deleting_marked else "current item"
+
+            def confirmed(destinations: dict[str, str]) -> None:
+                self._start_delete(
+                    targets,
+                    permanent=permanent,
+                    trash=not permanent,
+                    trash_destinations=destinations,
+                )
+
+            self._confirm_delete(
+                targets,
+                permanent=permanent,
+                target_text=target_text,
+                confirmed=confirmed,
+            )
+
+        def _confirm_delete(
+            self,
+            targets: list[str],
+            *,
+            permanent: bool,
+            target_text: str,
+            confirmed,
+        ) -> None:
+            try:
+                destinations = (
+                    {}
+                    if permanent
+                    else {target: self.service.trash_destination(target) for target in targets}
+                )
+            except (OSError, ValueError) as exc:
+                self.notify(f"Unable to choose trash destination: {exc}", severity="error")
+                return
+            lines: list[str] = []
+            for target in targets[:20]:
+                destination = "PERMANENT DELETE" if permanent else destinations[target]
+                lines.append(f"src: {target}\ndst: {destination}")
+            suffix = "" if len(targets) <= 20 else f"\n... and {len(targets) - 20} more"
+            action = "Permanently delete" if permanent else "Move to trash"
+            details = "\n\n".join(lines)
             message = (
-                f"Permanently delete {len(targets)} {target_text}?\n"
-                f"{preview}{suffix}\n\n"
+                f"{action} {len(targets)} {target_text}?\n\n"
+                f"{details}{suffix}\n\n"
                 "Press y to confirm, n or Esc to cancel."
             )
 
             def after(confirm: bool) -> None:
-                if not confirm:
-                    return
-                self._start_delete(targets, permanent=True, trash=False)
+                if confirm:
+                    confirmed(destinations)
 
             self.push_screen(ConfirmScreen(message), after)
 
-        def _start_delete(self, targets: list[str], *, permanent: bool, trash: bool) -> None:
+        def _start_delete(
+            self,
+            targets: list[str],
+            *,
+            permanent: bool,
+            trash: bool,
+            trash_destinations: dict[str, str] | None = None,
+        ) -> None:
             with self.delete_jobs_lock:
                 conflicts = [
                     target
@@ -1085,6 +1146,7 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
                     cancel_event,
                     permanent=permanent,
                     trash=trash,
+                    trash_destinations=trash_destinations,
                 ),
                 thread=True,
                 exclusive=False,
@@ -1174,6 +1236,7 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
             *,
             permanent: bool,
             trash: bool,
+            trash_destinations: dict[str, str] | None = None,
         ) -> None:
             completed: list[str] = []
             delete_service: DuxService | None = None
@@ -1239,7 +1302,7 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
                             self._show_delete_job_status, job_id, f"Index synchronized: {target}"
                         )
 
-                filesystem_first = self.service.immutable_fallback
+                filesystem_first = permanent and self.service.immutable_fallback
                 if not filesystem_first:
                     try:
                         delete_service = DuxService(
@@ -1289,6 +1352,7 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
                     workers=target_workers,
                     unlink_workers=unlink_workers,
                     cancel_event=cancel_event,
+                    trash_destinations=trash_destinations,
                 )
                 completed = targets
                 self.call_from_thread(

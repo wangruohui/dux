@@ -467,11 +467,16 @@ class DuxService:
         workers: int = 2,
         unlink_workers: int = 8,
         cancel_event: threading.Event | None = None,
+        trash_destinations: dict[str, str] | None = None,
     ) -> list[str]:
         if permanent == trash:
             raise ValueError("choose exactly one of permanent or trash")
 
         operation_cancel = cancel_event or threading.Event()
+        canonical_destinations = {
+            self.canonical(source): os.path.abspath(os.path.expanduser(destination))
+            for source, destination in (trash_destinations or {}).items()
+        }
         targets: list[tuple[str, bool]] = []
         for path in paths:
             target = self.canonical(path)
@@ -538,7 +543,9 @@ class DuxService:
             if trash:
                 if operation_cancel.is_set():
                     return "", False
-                return self._move_to_trash(target), True
+                return self._move_to_trash(
+                    target, destination=canonical_destinations.get(target)
+                ), True
 
             def report(count: int, current_path: str) -> None:
                 if progress is not None:
@@ -839,21 +846,50 @@ class DuxService:
             db.delete_subtree_rows(self.conn, root)
             db.refresh_ancestor_aggregates(self.conn, root)
 
-    def _move_to_trash(self, path: str) -> str:
-        home = Path.home().resolve()
-        source = Path(path)
-        trash_root = home / "trash"
+    def trash_destination(self, path: str) -> str:
+        source = Path(self.canonical(path))
+        storage_root = Path("/mnt/afs")
         try:
-            rel = source.relative_to(home)
-            destination = trash_root / rel
+            relative_to_storage = source.relative_to(storage_root)
         except ValueError:
-            destination = trash_root / source.relative_to("/")
-        if destination.exists():
+            home = Path.home().resolve()
+            trash_root = home / "trash"
+            try:
+                relative = source.relative_to(home)
+            except ValueError:
+                relative = source.relative_to("/")
+        else:
+            if len(relative_to_storage.parts) < 2:
+                raise ValueError(f"refusing to move storage root to its own trash: {source}")
+            account_root = storage_root / relative_to_storage.parts[0]
+            relative = source.relative_to(account_root)
+            if relative.parts[0] == "trash":
+                raise ValueError(f"path is already inside trash: {source}")
+            trash_root = account_root / "trash"
+
+        destination = trash_root / relative
+        if destination == source or destination.is_relative_to(source):
+            raise ValueError(f"trash destination is inside source: {source}")
+        if os.path.lexists(destination):
+            base_destination = destination
             suffix = time.strftime("%Y%m%d_%H%M%S")
-            destination = destination.with_name(f"{destination.name}.{suffix}")
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(source), str(destination))
+            destination = base_destination.with_name(f"{base_destination.name}.{suffix}")
+            counter = 1
+            while os.path.lexists(destination):
+                destination = base_destination.with_name(
+                    f"{base_destination.name}.{suffix}.{counter}"
+                )
+                counter += 1
         return str(destination)
+
+    def _move_to_trash(self, path: str, destination: str | None = None) -> str:
+        source = Path(path)
+        target = Path(destination or self.trash_destination(path))
+        if destination is not None and os.path.lexists(target):
+            raise FileExistsError(f"confirmed trash destination now exists: {target}")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(source), str(target))
+        return str(target)
 
     def _remove_from_fs(
         self,

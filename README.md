@@ -17,7 +17,7 @@ Path: /data/project                         Sort: size
 │   9.7G   │    14,006 │ 2026-06-22 │ tmp/                         │ [                ] │
 └──────────┴───────────┴────────────┴──────────────────────────────┴────────────────────┘
 
-Enter open/preview  Backspace parent  Alt+Left/Right history  Space select  Del/Shift+Del delete
+Enter open/preview  Backspace parent  Alt+Left/Right history  Space select  Del trash  Shift+Del permanent
 s size  c count  m date  n name  r refresh  f filter  x cancel filter/refresh/delete  q quit
 ```
 
@@ -58,8 +58,8 @@ s size  c count  m date  n name  r refresh  f filter  x cancel filter/refresh/de
 - **局部刷新**：对变化的子树重新 `index` 即可，父路径聚合值会自动更新；UI 中按 `r` 可后台刷新光标项目。
 - **Partial navigation**: ancestors of indexed subtrees are kept as navigation placeholders; unindexed live entries are shown as `unindexed`.
 - **部分索引导航**：已统计子树的父路径会保留导航骨架，未统计的现场条目标记为 `unindexed`。
-- **Cursor and batch delete**: use `Delete` or `Shift+Delete` to delete the current row, or `Space` to mark multiple rows and delete them together.
-- **光标和批量删除**：`Delete` 或 `Shift+Delete` 删除当前行；也可以用 `Space` 标记多行后一起删除。
+- **Recoverable and permanent cleanup**: `Delete` moves the current or selected rows to storage-local trash while preserving their relative paths; only `Shift+Delete` permanently removes them.
+- **可恢复与永久清理**：`Delete` 把当前行或选中行移动到同一存储根下的 trash 并保留相对路径；只有 `Shift+Delete` 才会永久删除。
 - **Responsive deletion**: deletion runs in background workers with a status line showing progress, rate, current path, and index-sync phase; press `x` to cancel the latest active delete job.
 - **响应式删除**：删除在后台 worker 中执行，状态栏会显示进度、速度、当前路径和索引同步阶段；按 `x` 可取消最近启动的删除任务。
 - **Parallel cleanup**: multiple selected roots can be deleted concurrently; each directory tree is scanned and unlinked with worker threads.
@@ -156,8 +156,10 @@ dux --workers 16 index /data/project
 - `Alt+Left` / `Alt+Right`：按目录访问历史后退或前进。
 - `Space`: select or unselect the current row; selected rows are highlighted and prefixed with `[x]`. Selections are scoped to the current directory page and are cleared when entering a child or returning to the parent.
 - `Space`：选择或取消选择当前行；选中行会高亮并显示 `[x]`。选择仅限当前目录页面，进入子目录或返回父目录时会清空。
-- `Delete` / `Shift+Delete`: delete marked rows visible on the current page; otherwise delete the current row. Hidden selections from another directory are never included. Files within a directory and multiple delete jobs run concurrently while sharing a global concurrency limit of 256. Press `y` to confirm, `n` or `Esc` to cancel.
-- `Delete` / `Shift+Delete`：只删除当前页面中可见的已选行；否则删除当前光标行，其他目录中的隐藏选择绝不会被带入。目录内部文件和多个删除任务都会并行删除，并共享全局 256 并发限制。按 `y` 确认，按 `n` 或 `Esc` 取消。
+- `Delete`: move marked rows visible on the current page, or the current row, to trash. Relative paths are preserved and the confirmation lists each `src` and `dst`.
+- `Delete`：把当前页面中可见的已选行（没有选择时为当前光标行）移动到 trash，保留相对路径；确认框会列出每项的 `src` 和 `dst`。
+- `Shift+Delete`: permanently remove the same target set. Files within a directory and multiple delete jobs run concurrently while sharing a global concurrency limit of 256. Press `y` to confirm, `n` or `Esc` to cancel.
+- `Shift+Delete`：永久删除同一目标集合。目录内部文件和多个删除任务会并行处理，并共享全局 256 并发限制。按 `y` 确认，按 `n` 或 `Esc` 取消。
 - `r`: refresh the path under the current cursor in the background. Scanning uses a staging database and the completed subtree is merged in one short transaction.
 - `r`：在后台刷新当前光标所在的路径；扫描写入 staging 数据库，完成后用一个短事务合并。
 - `f`: recursively find file/directory basenames using shell globs such as `a*`, with optional exclude-path pruning; it remains available while deletion runs.

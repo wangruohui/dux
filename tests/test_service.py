@@ -326,6 +326,32 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(sub_row["size_bytes"], 0)
         self.assertEqual(sub_row["file_count"], 0)
 
+    def test_trash_destination_preserves_storage_relative_path(self) -> None:
+        with patch("dux.service.os.path.lexists", return_value=False):
+            destination = self.service.trash_destination("/mnt/afs/A/B/C/D")
+        self.assertEqual(destination, "/mnt/afs/A/trash/B/C/D")
+
+    def test_trash_move_uses_confirmed_destination_and_updates_index(self) -> None:
+        home = Path(self.tmp.name) / "home"
+        source = home / "B" / "C" / "D"
+        source.mkdir(parents=True)
+        (source / "item.bin").write_bytes(b"data")
+        self.service.index_path(str(home))
+        destination = home / "trash" / "B" / "C" / "D"
+
+        self.service.delete_paths(
+            [str(source)],
+            trash=True,
+            trash_destinations={str(source): str(destination)},
+        )
+
+        self.assertFalse(source.exists())
+        self.assertTrue((destination / "item.bin").exists())
+        self.assertIsNone(self.service.get_node(str(source)))
+        home_row = self.service.get_node(str(home))
+        self.assertEqual(int(home_row["file_count"]), 0)
+        self.assertEqual(int(home_row["size_bytes"]), 0)
+
     def test_prefix_paths_do_not_confuse_refresh(self) -> None:
         a = self.root / "flow_grpo_neo"
         b = self.root / "flow_grpo_neo_align" / "work_dir"

@@ -162,8 +162,11 @@ class CliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "root"
             target = root / "target"
+            trash_target = root / "trash-target"
             target.mkdir(parents=True)
+            trash_target.mkdir()
             (target / "item.bin").write_bytes(b"data")
+            (trash_target / "item.bin").write_bytes(b"keep")
             db_path = Path(directory) / "dux.db"
             service = DuxService(db_path=db_path, max_workers=2)
             service.index_path(str(root))
@@ -192,6 +195,81 @@ class CliTests(unittest.TestCase):
                 self.assertEqual(finishes[0][2], [str(target)])
                 self.assertTrue(finishes[0][5])
                 self.assertIsNone(service.get_node(str(target)))
+
+                with patch(
+                    "dux.tui.DuxService",
+                    side_effect=sqlite3.OperationalError("database or disk is full"),
+                ):
+                    app._delete_worker(
+                        2,
+                        [str(trash_target)],
+                        threading.Event(),
+                        permanent=False,
+                        trash=True,
+                        trash_destinations={
+                            str(trash_target): str(root / "trash" / "trash-target")
+                        },
+                    )
+                self.assertTrue(trash_target.exists())
+                self.assertIsNotNone(finishes[1][3])
+                app.service.close()
+            finally:
+                service.close()
+
+    def test_ui_delete_keys_select_trash_and_permanent_modes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "root"
+            target = root / "target"
+            target.mkdir(parents=True)
+            db_path = Path(directory) / "dux.db"
+            service = DuxService(db_path=db_path, max_workers=1)
+            service.index_path(str(root))
+            apps = []
+            try:
+                with patch("textual.app.App.run", lambda app, *args, **kwargs: apps.append(app)):
+                    run_ui(str(db_path), str(root), 1)
+                app = apps[0]
+                expected_destination = "/mnt/afs/A/trash/B/C/D"
+                app._selected_path = lambda: "/mnt/afs/A/B/C/D"
+                app.service.trash_destination = lambda _path: expected_destination
+                confirmations = []
+                started = []
+                app.push_screen = (
+                    lambda screen, callback=None: confirmations.append((screen, callback))
+                )
+                app._start_delete = lambda targets, **kwargs: started.append((targets, kwargs))
+
+                bindings = {(binding.key, binding.action) for binding in app.BINDINGS}
+                self.assertIn(("delete", "trash_requested"), bindings)
+                self.assertIn(
+                    ("shift+delete", "permanent_delete_requested"), bindings
+                )
+
+                app.action_trash_requested()
+                screen, callback = confirmations.pop()
+                self.assertIn("src: /mnt/afs/A/B/C/D", screen.message)
+                self.assertIn(f"dst: {expected_destination}", screen.message)
+                callback(True)
+                expected = {
+                    "permanent": False,
+                    "trash": True,
+                    "trash_destinations": {
+                        "/mnt/afs/A/B/C/D": expected_destination
+                    },
+                }
+                self.assertEqual(started.pop(), (["/mnt/afs/A/B/C/D"], expected))
+
+                app.action_permanent_delete_requested()
+                screen, callback = confirmations.pop()
+                self.assertIn("src: /mnt/afs/A/B/C/D", screen.message)
+                self.assertIn("dst: PERMANENT DELETE", screen.message)
+                callback(True)
+                expected = {
+                    "permanent": True,
+                    "trash": False,
+                    "trash_destinations": {},
+                }
+                self.assertEqual(started.pop(), (["/mnt/afs/A/B/C/D"], expected))
                 app.service.close()
             finally:
                 service.close()
@@ -330,6 +408,16 @@ class CliTests(unittest.TestCase):
                         self.assertEqual(
                             row_order(),
                             [entries[2].path, entries[1].path, entries[0].path, entries[3].path],
+                        )
+                        delete_modes = []
+                        app._confirm_delete = lambda targets, **kwargs: delete_modes.append(
+                            (targets, kwargs["permanent"])
+                        )
+                        screen.action_accept_results()
+                        screen.action_accept_results(permanent=True)
+                        self.assertEqual(
+                            delete_modes,
+                            [([entries[0].path], False), ([entries[0].path], True)],
                         )
                         self.assertIn("width: 94%", app.CSS)
 
