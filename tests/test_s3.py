@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import unittest
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -13,12 +14,17 @@ from dux.s3_tui import run_s3_ui
 
 class FakeS3Client:
     def __init__(self) -> None:
-        self.listings: dict[str, list[tuple[str, bool, int | None]]] = {}
+        self.listings: dict[
+            str, list[tuple[str, bool, int | None, float | None]]
+        ] = {}
         self.list_calls: list[str] = []
         self.deleted: list[str] = []
 
     def list(self, uri: str):
-        return [name + ("/" if is_dir else "") for name, is_dir, _ in self.listings[uri]]
+        return [
+            name + ("/" if is_dir else "")
+            for name, is_dir, _, _ in self.listings[uri]
+        ]
 
     def list_with_info(self, uri: str):
         self.list_calls.append(uri)
@@ -39,8 +45,8 @@ class S3BrowserTests(unittest.TestCase):
     def test_listing_uses_sizes_and_cache(self) -> None:
         client = FakeS3Client()
         client.listings["s3://bucket/root"] = [
-            ("folder", True, None),
-            ("file.bin", False, 1536),
+            ("folder", True, None, None),
+            ("file.bin", False, 1536, 100.0),
         ]
         browser = S3Browser(client, cache_ttl=300)
 
@@ -72,11 +78,25 @@ class S3BrowserTests(unittest.TestCase):
                 return [
                     {
                         "CommonPrefixes": [{"Prefix": "root/folder/"}],
-                        "Contents": [
-                            {"Key": "root/", "Size": 0},
-                            {"Key": "root/file.bin", "Size": 1536},
+                        "Contents": [{"Key": "root/", "Size": 0}]
+                        + [
+                            {
+                                "Key": f"root/file-{index:04d}.bin",
+                                "Size": index,
+                                "LastModified": datetime.fromtimestamp(index, timezone.utc),
+                            }
+                            for index in range(1000)
                         ],
-                    }
+                    },
+                    {
+                        "Contents": [
+                            {
+                                "Key": "root/tail.bin",
+                                "Size": 10,
+                                "LastModified": datetime.fromtimestamp(200, timezone.utc),
+                            }
+                        ]
+                    },
                 ]
 
         class LowLevelClient:
@@ -102,23 +122,53 @@ class S3BrowserTests(unittest.TestCase):
         )
 
         entries = list(adapter.list_with_info("s3://bucket/root"))
-        adapter.delete("s3://bucket/root/file.bin")
+        adapter.delete("s3://bucket/root/file-0000.bin")
 
-        self.assertEqual(entries, [("folder", True, None), ("file.bin", False, 1536)])
+        self.assertEqual(len(entries), 1002)
+        self.assertEqual(entries[0], ("folder", True, None, None))
+        self.assertEqual(entries[1], ("file-0000.bin", False, 0, 0.0))
+        self.assertEqual(entries[-1], ("tail.bin", False, 10, 200.0))
         self.assertEqual(low_level.paginator_name, "list_objects")
         self.assertEqual(low_level.paginator.kwargs["Delimiter"], "/")
         self.assertEqual(
             low_level.deleted,
-            [{"Bucket": "bucket", "Key": "root/file.bin"}],
+            [{"Bucket": "bucket", "Key": "root/file-0000.bin"}],
         )
+
+    def test_cached_directory_size_becomes_exact_after_visiting_children(self) -> None:
+        client = FakeS3Client()
+        client.listings["s3://bucket"] = [("root", True, None, None)]
+        client.listings["s3://bucket/root"] = [
+            ("direct.bin", False, 10, 100.0),
+            ("nested", True, None, None),
+        ]
+        client.listings["s3://bucket/root/nested"] = [
+            ("deep.bin", False, 20, 200.0)
+        ]
+        browser = S3Browser(client)
+
+        browser.list_children("s3://bucket")
+        browser.list_children("s3://bucket/root")
+        partial = browser.list_children("s3://bucket").entries[0]
+        self.assertEqual(partial.size_bytes, 10)
+        self.assertFalse(partial.size_complete)
+        self.assertEqual(partial.mtime, 100.0)
+
+        browser.list_children("s3://bucket/root/nested")
+        complete = browser.list_children("s3://bucket").entries[0]
+        self.assertEqual(complete.size_bytes, 30)
+        self.assertTrue(complete.size_complete)
+        self.assertEqual(complete.mtime, 200.0)
 
     def test_recursive_delete_removes_objects_and_prefix_markers(self) -> None:
         client = FakeS3Client()
         client.listings["s3://bucket/root"] = [
-            ("file.txt", False, 1),
-            ("nested", True, None),
+            ("file.txt", False, 1, 100.0),
+            ("nested", True, None, None),
         ]
-        client.listings["s3://bucket/root/nested"] = [("data.bin", False, 2)]
+        client.listings["s3://bucket/root/nested"] = [
+            ("data.bin", False, 2, 200.0)
+        ]
         browser = S3Browser(client, max_workers=4)
         progress: list[tuple[str, int, int | None, str]] = []
 
@@ -139,6 +189,20 @@ class S3BrowserTests(unittest.TestCase):
         )
         self.assertTrue(any(item[0] == "listing" for item in progress))
         self.assertTrue(any(item[0] == "deleting" for item in progress))
+
+    def test_delete_invalidates_parent_listing_cache(self) -> None:
+        client = FakeS3Client()
+        client.listings["s3://bucket/root"] = [("file.bin", False, 10, 100.0)]
+        browser = S3Browser(client)
+        entry = browser.list_children("s3://bucket/root").entries[0]
+
+        browser.delete_entries([entry])
+        client.listings["s3://bucket/root"] = []
+        refreshed = browser.list_children("s3://bucket/root")
+
+        self.assertFalse(refreshed.cached)
+        self.assertEqual(refreshed.entries, ())
+        self.assertEqual(client.list_calls.count("s3://bucket/root"), 2)
 
     def test_cancel_before_delete_does_not_remove_objects(self) -> None:
         client = FakeS3Client()
@@ -163,8 +227,8 @@ class S3BrowserTests(unittest.TestCase):
     def test_tui_lists_sizes_selects_and_navigates(self) -> None:
         client = FakeS3Client()
         client.listings["s3://bucket/root"] = [
-            ("folder", True, None),
-            ("file.bin", False, 1536),
+            ("folder", True, None, None),
+            ("file.bin", False, 1536, 100.0),
         ]
         client.listings["s3://bucket/root/folder"] = []
         browser = S3Browser(client)
@@ -185,7 +249,9 @@ class S3BrowserTests(unittest.TestCase):
                     await pilot.pause(0.01)
                 self.assertEqual(len(app.rows_by_uri), 2)
                 table = app.query_one("#table")
-                self.assertEqual(str(table.get_row("s3://bucket/root/file.bin")[1]), "1.5K")
+                file_row = table.get_row("s3://bucket/root/file.bin")
+                self.assertEqual(str(file_row[1]), "1.5K")
+                self.assertNotEqual(str(file_row[2]), "-")
 
                 await pilot.press("space")
                 self.assertEqual(app.marked_uris, {"s3://bucket/root/folder"})
@@ -193,6 +259,14 @@ class S3BrowserTests(unittest.TestCase):
                 self.assertEqual(app.current_uri, "s3://bucket/root/folder")
                 await pilot.press("backspace")
                 self.assertEqual(app.current_uri, "s3://bucket/root")
+                for _ in range(20):
+                    if len(app.rows_by_uri) == 2:
+                        break
+                    await pilot.pause(0.01)
+                self.assertEqual(
+                    str(table.get_row("s3://bucket/root/folder")[1]),
+                    "0B",
+                )
 
         asyncio.run(exercise())
 

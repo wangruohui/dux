@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import time
 
 from .s3 import S3Browser, S3DeleteCancelled, S3Entry, canonical_s3_uri, s3_parent
 
@@ -133,7 +134,7 @@ def run_s3_ui(
         def on_mount(self) -> None:
             table = self.query_one(DataTable)
             table.cursor_type = "row"
-            table.add_columns("Type", "Size", "Name")
+            table.add_columns("Type", "Size", "Date", "Name")
             self._load_current()
 
         def _set_status(self, message: str) -> None:
@@ -145,7 +146,7 @@ def run_s3_ui(
             current = self.current_uri
             table = self.query_one(DataTable)
             table.clear()
-            table.add_row("", "", "Loading...", key="__loading__")
+            table.add_row("", "", "", "Loading...", key="__loading__")
             self.rows_by_uri.clear()
             self.title = current
             self._set_status(f"Loading {current}...")
@@ -178,7 +179,7 @@ def run_s3_ui(
             table.clear()
             self.rows_by_uri.clear()
             if error is not None:
-                table.add_row("", "", f"Error: {error}", key="__error__")
+                table.add_row("", "", "", f"Error: {error}", key="__error__")
                 self._set_status(f"Unable to list {loaded_uri}: {error}")
                 self.notify(str(error), severity="error")
                 return
@@ -189,10 +190,18 @@ def run_s3_ui(
                 style = "bold black on yellow" if marked else ""
                 kind = "DIR" if entry.is_dir else "OBJECT"
                 size = "-" if entry.size_bytes is None else _human_bytes(entry.size_bytes)
+                if entry.is_dir and entry.size_bytes is not None and not entry.size_complete:
+                    size = f">={size}"
+                date = (
+                    time.strftime("%Y-%m-%d %H:%M", time.localtime(entry.mtime))
+                    if entry.mtime is not None
+                    else "-"
+                )
                 name = entry.name + ("/" if entry.is_dir else "")
                 table.add_row(
                     Text(kind, style=style),
                     Text(size, style=style),
+                    Text(date, style=style),
                     Text(name, style=style),
                     key=entry.uri,
                 )
@@ -200,7 +209,7 @@ def run_s3_ui(
                 if entry.uri == focus_uri:
                     focus_row = index
             if not entries:
-                table.add_row("", "", "(empty)", key="__empty__")
+                table.add_row("", "", "", "(empty)", key="__empty__")
             if focus_row is not None:
                 table.move_cursor(row=focus_row, column=0, animate=False)
             source = "cache" if cached else "remote"

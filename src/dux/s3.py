@@ -4,7 +4,7 @@ import threading
 import time
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Iterable, Protocol
 
@@ -21,6 +21,8 @@ class S3Entry:
     name: str
     is_dir: bool
     size_bytes: int | None = None
+    mtime: float | None = None
+    size_complete: bool = False
 
 
 @dataclass(frozen=True)
@@ -73,7 +75,9 @@ class AossClientAdapter:
     def list(self, uri: str) -> Iterable[str]:
         return self._client.list(uri)
 
-    def list_with_info(self, uri: str) -> Iterable[tuple[str, bool, int | None]]:
+    def list_with_info(
+        self, uri: str
+    ) -> Iterable[tuple[str, bool, int | None, float | None]]:
         # Client.list() discards Size, so retain it from the same delimiter-based request.
         try:
             from aoss_client.ceph.ceph import Ceph
@@ -85,7 +89,7 @@ class AossClientAdapter:
             client = backend._s3_resource.meta.client
         except (AttributeError, KeyError):
             for name in self.list(uri):
-                yield str(name), str(name).endswith("/"), None
+                yield str(name), str(name).endswith("/"), None, None
             return
 
         prefix = key or ""
@@ -102,11 +106,13 @@ class AossClientAdapter:
             for item in page.get("CommonPrefixes", []):
                 name = str(item["Prefix"])[len(prefix) :].rstrip("/")
                 if name:
-                    yield name, True, None
+                    yield name, True, None, None
             for item in page.get("Contents", []):
                 name = str(item["Key"])[len(prefix) :]
                 if name:
-                    yield name, False, int(item["Size"])
+                    modified = item.get("LastModified")
+                    mtime = modified.timestamp() if hasattr(modified, "timestamp") else None
+                    yield name, False, int(item["Size"]), mtime
 
     def delete(self, uri: str) -> object:
         try:
@@ -156,30 +162,42 @@ class S3Browser:
         current = canonical_s3_uri(uri)
         now = time.monotonic()
         if not force:
+            cached_entries: tuple[S3Entry, ...] | None = None
             with self._cache_lock:
                 cached = self._cache.get(current)
                 if cached is not None and now - cached[0] <= self.cache_ttl:
                     self._cache.move_to_end(current)
-                    return S3Listing(cached[1], cached=True)
+                    cached_entries = cached[1]
+            if cached_entries is not None:
+                return S3Listing(
+                    self._with_cached_aggregates(cached_entries), cached=True
+                )
 
         entries_by_uri: dict[str, S3Entry] = {}
         client = self._get_client()
         list_with_info = getattr(client, "list_with_info", None)
         if list_with_info is None:
             raw_entries = (
-                (str(name), str(name).endswith("/"), None)
+                (str(name), str(name).endswith("/"), None, None)
                 for name in client.list(current)
             )
         else:
             raw_entries = list_with_info(current)
-        for raw_name, is_dir, size_bytes in raw_entries:
+        for raw_name, is_dir, size_bytes, mtime in raw_entries:
             name = str(raw_name).rstrip("/")
             if not name:
                 continue
             child_uri = _join_s3_uri(current, name)
             previous = entries_by_uri.get(child_uri)
             if previous is None or is_dir:
-                entries_by_uri[child_uri] = S3Entry(child_uri, name, is_dir, size_bytes)
+                entries_by_uri[child_uri] = S3Entry(
+                    child_uri,
+                    name,
+                    is_dir,
+                    size_bytes,
+                    mtime,
+                    not is_dir and size_bytes is not None,
+                )
         entries = tuple(
             sorted(entries_by_uri.values(), key=lambda entry: (not entry.is_dir, entry.name.casefold()))
         )
@@ -188,7 +206,58 @@ class S3Browser:
             self._cache.move_to_end(current)
             while len(self._cache) > self.cache_size:
                 self._cache.popitem(last=False)
-        return S3Listing(entries, cached=False)
+        return S3Listing(self._with_cached_aggregates(entries), cached=False)
+
+    def _with_cached_aggregates(
+        self, entries: tuple[S3Entry, ...]
+    ) -> tuple[S3Entry, ...]:
+        now = time.monotonic()
+        with self._cache_lock:
+            cached_listings = {
+                uri: cached_entries
+                for uri, (created_at, cached_entries) in self._cache.items()
+                if now - created_at <= self.cache_ttl
+            }
+        memo: dict[str, tuple[int | None, bool, float | None]] = {}
+
+        def aggregate(uri: str) -> tuple[int | None, bool, float | None]:
+            if uri in memo:
+                return memo[uri]
+            children = cached_listings.get(uri)
+            if children is None:
+                return None, False, None
+            total = 0
+            has_known_size = False
+            complete = True
+            latest_mtime: float | None = None
+            for child in children:
+                if child.is_dir:
+                    size, child_complete, mtime = aggregate(child.uri)
+                else:
+                    size = child.size_bytes
+                    child_complete = child.size_complete
+                    mtime = child.mtime
+                if size is not None:
+                    total += size
+                    has_known_size = True
+                if not child_complete:
+                    complete = False
+                if mtime is not None:
+                    latest_mtime = max(latest_mtime or mtime, mtime)
+            result = (total if has_known_size or complete else None, complete, latest_mtime)
+            memo[uri] = result
+            return result
+
+        enriched: list[S3Entry] = []
+        for entry in entries:
+            if not entry.is_dir:
+                enriched.append(entry)
+                continue
+            size, complete, mtime = aggregate(entry.uri)
+            enriched.append(
+                replace(entry, size_bytes=size, mtime=mtime, size_complete=complete)
+            )
+        return tuple(enriched)
 
     def invalidate(self, uri: str | None = None) -> None:
         with self._cache_lock:
