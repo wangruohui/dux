@@ -1,14 +1,24 @@
 from __future__ import annotations
 
 import asyncio
+import tempfile
 import threading
 import unittest
 from datetime import datetime, timezone
 from types import SimpleNamespace
+from pathlib import Path
 from unittest.mock import patch
 
 from dux.cli import main
-from dux.s3 import AossClientAdapter, S3Browser, S3Entry, canonical_s3_uri, s3_parent
+from dux.s3 import (
+    AossClientAdapter,
+    S3Browser,
+    S3Entry,
+    S3Object,
+    canonical_s3_uri,
+    s3_parent,
+)
+from dux.s3_index import S3IndexResult, S3IndexStore, index_s3
 from dux.s3_tui import run_s3_ui
 
 
@@ -19,6 +29,7 @@ class FakeS3Client:
         ] = {}
         self.list_calls: list[str] = []
         self.deleted: list[str] = []
+        self.objects: dict[str, list[S3Object]] = {}
 
     def list(self, uri: str):
         return [
@@ -32,6 +43,9 @@ class FakeS3Client:
 
     def delete(self, uri: str) -> None:
         self.deleted.append(uri)
+
+    def iter_objects(self, uri: str):
+        return iter(self.objects[uri])
 
 
 class S3BrowserTests(unittest.TestCase):
@@ -221,8 +235,51 @@ class S3BrowserTests(unittest.TestCase):
         with patch("dux.cli.run_s3_ui") as run_s3, patch("dux.cli.run_ui") as run_local:
             self.assertEqual(main(["ui", "s3://bucket/root"]), 0)
 
-        run_s3.assert_called_once_with("s3://bucket/root", 256)
+        run_s3.assert_called_once_with("s3://bucket/root", 256, stats_db_path=None)
         run_local.assert_not_called()
+
+    def test_index_aggregates_prefixes_and_delete_updates_stats(self) -> None:
+        client = FakeS3Client()
+        client.objects["s3://bucket"] = [
+            S3Object("s3://bucket/direct.bin", 10, 100.0),
+            S3Object("s3://bucket/a/file.bin", 20, 200.0),
+            S3Object("s3://bucket/a/b/deep.bin", 30, 300.0),
+        ]
+        browser = S3Browser(client)
+        with tempfile.TemporaryDirectory() as directory:
+            store = S3IndexStore(Path(directory) / "s3.db")
+            result = index_s3(browser, "s3://bucket", store, progress_interval=1)
+
+            self.assertEqual(result.object_count, 3)
+            self.assertEqual(result.prefix_count, 3)
+            stats = store.get_many(
+                ["s3://bucket", "s3://bucket/a", "s3://bucket/a/b"]
+            )
+            self.assertEqual((stats["s3://bucket"].size_bytes, stats["s3://bucket"].object_count), (60, 3))
+            self.assertEqual((stats["s3://bucket/a"].size_bytes, stats["s3://bucket/a"].object_count), (50, 2))
+            self.assertEqual((stats["s3://bucket/a/b"].size_bytes, stats["s3://bucket/a/b"].object_count), (30, 1))
+
+            store.apply_deleted(
+                [S3Object("s3://bucket/a/b/deep.bin", 30, 300.0)],
+                completed_prefixes=["s3://bucket/a/b"],
+            )
+            updated = store.get_many(
+                ["s3://bucket", "s3://bucket/a", "s3://bucket/a/b"]
+            )
+            self.assertEqual((updated["s3://bucket"].size_bytes, updated["s3://bucket"].object_count), (30, 2))
+            self.assertEqual((updated["s3://bucket/a"].size_bytes, updated["s3://bucket/a"].object_count), (20, 1))
+            self.assertNotIn("s3://bucket/a/b", updated)
+
+    def test_cli_routes_s3_index_without_local_scanner(self) -> None:
+        result = S3IndexResult("s3://bucket", 1, 1, 10, 1.0, 0.1)
+        with patch("dux.cli.S3Browser") as browser_type, patch(
+            "dux.cli.S3IndexStore"
+        ) as store_type, patch("dux.cli.index_s3", return_value=result) as scan:
+            self.assertEqual(main(["index", "s3://bucket"]), 0)
+
+        scan.assert_called_once()
+        browser_type.assert_called_once_with(max_workers=32)
+        store_type.assert_called_once_with(None)
 
     def test_tui_lists_sizes_selects_and_navigates(self) -> None:
         client = FakeS3Client()
@@ -251,7 +308,8 @@ class S3BrowserTests(unittest.TestCase):
                 table = app.query_one("#table")
                 file_row = table.get_row("s3://bucket/root/file.bin")
                 self.assertEqual(str(file_row[1]), "1.5K")
-                self.assertNotEqual(str(file_row[2]), "-")
+                self.assertEqual(str(file_row[2]), "1")
+                self.assertNotEqual(str(file_row[3]), "-")
 
                 await pilot.press("space")
                 self.assertEqual(app.marked_uris, {"s3://bucket/root/folder"})

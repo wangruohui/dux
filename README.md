@@ -109,9 +109,21 @@ Browse S3 without indexing (requires a compatible `aoss_client` installation and
 dux ui s3://example-bucket/project
 ```
 
-S3 mode lists every page of the current prefix; a page contains up to 1,000 entries. Direct objects show the size and modification time returned by the same listing request. After visiting a directory, returning to its parent shows its cached recursive size: `>=` means some child prefixes remain unvisited, while a plain value is exact for the cached tree. No implicit recursive scan is started. `Enter`/`Right`, `Backspace`, and `Alt+Left/Right` navigate; `Space` selects, `Delete` confirms permanent removal, `r` bypasses the five-minute in-memory cache, and `x` cancels deletion. Delete completion or cancellation invalidates related cache entries before reloading the current prefix.
+Build exact recursive prefix statistics with one streaming object-list pass:
 
-S3 模式会遍历当前 prefix 的全部分页，每页最多 1000 项。普通对象显示同一次 list 请求返回的大小和修改时间。进入目录再返回父级后，会显示该目录的缓存递归大小：`>=` 表示仍有子 prefix 未访问，不带前缀的值表示缓存树已经完整；不会隐式启动递归扫描。使用 `Enter`/`Right`、`Backspace` 和 `Alt+Left/Right` 导航；`Space` 选择，`Delete` 确认永久删除，`r` 绕过五分钟内存缓存，`x` 取消删除。删除完成或取消后会先失效相关缓存，再重新加载当前 prefix。
+通过一次流式对象列表扫描构建精确的递归 prefix 统计：
+
+```bash
+dux index s3://example-bucket
+```
+
+S3 statistics are stored in `~/.cache/dux/s3.db` by default. The index stores one row per prefix, not one row per object. Progress reports object throughput every 10,000 objects; `--progress-interval` changes that interval, and `--db` selects another statistics database.
+
+S3 统计默认保存在 `~/.cache/dux/s3.db`。索引只为每个 prefix 保存一行，不会为每个对象保存记录。扫描时每 10000 个对象输出一次吞吐；可用 `--progress-interval` 调整间隔，用 `--db` 指定其他统计数据库。
+
+S3 mode lists every page of the current prefix; a page contains up to 1,000 entries. Direct objects show the size and modification time returned by the same listing request. Exact `dux index` statistics take priority for directory size and object count. Without an exact index, returning after visiting a directory shows its cached recursive size: `>=` means some child prefixes remain unvisited, while a plain value is exact for the cached tree. No implicit recursive scan is started. `Enter`/`Right`, `Backspace`, and `Alt+Left/Right` navigate; `Space` selects, `Delete` confirms permanent removal, `r` bypasses the five-minute in-memory cache, and `x` cancels deletion. Successfully deleted objects are deducted from the persistent index even when cancellation interrupts the remaining work; related listing caches are then invalidated.
+
+S3 模式会遍历当前 prefix 的全部分页，每页最多 1000 项。普通对象显示同一次 list 请求返回的大小和修改时间；目录优先显示 `dux index` 生成的精确大小和对象数。没有精确索引时，进入目录再返回父级会显示缓存递归大小：`>=` 表示仍有子 prefix 未访问，不带前缀的值表示缓存树已经完整；不会隐式启动递归扫描。使用 `Enter`/`Right`、`Backspace` 和 `Alt+Left/Right` 导航；`Space` 选择，`Delete` 确认永久删除，`r` 绕过五分钟内存缓存，`x` 取消删除。即使后续工作被取消，已经成功删除的对象也会从持久索引中扣除，随后失效相关 listing 缓存。
 
 List children from the CLI:
 

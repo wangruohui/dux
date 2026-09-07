@@ -6,6 +6,8 @@ import time
 from pathlib import Path
 
 from .service import DuxService
+from .s3 import S3Browser
+from .s3_index import S3IndexStore, index_s3
 from .s3_tui import run_s3_ui
 from .tui import run_ui
 
@@ -53,9 +55,43 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "ui":
         if args.path.startswith("s3://"):
-            run_s3_ui(args.path, args.workers)
+            run_s3_ui(args.path, args.workers, stats_db_path=args.db)
         else:
             run_ui(args.db, args.path, args.workers)
+        return 0
+
+    if args.command == "index" and args.path.startswith("s3://"):
+        browser = S3Browser(max_workers=min(args.workers, 32))
+        store = S3IndexStore(args.db)
+
+        def report_s3_progress(
+            object_count: int,
+            prefix_count: int,
+            current: str,
+            elapsed: float,
+        ) -> None:
+            rate = object_count / max(elapsed, 0.000001)
+            print(
+                f"scanned_objects={object_count} prefixes={prefix_count} "
+                f"objects_per_sec={rate:.1f} current={current}",
+                file=sys.stderr,
+                flush=True,
+            )
+
+        result = index_s3(
+            browser,
+            args.path,
+            store,
+            progress=report_s3_progress,
+            progress_interval=args.progress_interval,
+        )
+        rate = result.object_count / max(result.scan_seconds, 0.000001)
+        print(
+            f"indexed {result.root_uri} size={result.size_bytes} "
+            f"objects={result.object_count} prefixes={result.prefix_count} "
+            f"scan_elapsed={result.scan_seconds:.3f}s "
+            f"write_elapsed={result.write_seconds:.3f}s objects_per_sec={rate:.1f}"
+        )
         return 0
 
     service = DuxService(

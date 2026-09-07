@@ -15,6 +15,23 @@ class S3Client(Protocol):
     def delete(self, uri: str) -> object: ...
 
 
+class S3StatsStore(Protocol):
+    def get_many(self, uris: Iterable[str]) -> dict[str, object]: ...
+
+    def apply_deleted(
+        self,
+        objects: Iterable[S3Object],
+        completed_prefixes: Iterable[str] = (),
+    ) -> None: ...
+
+
+@dataclass(frozen=True)
+class S3Object:
+    uri: str
+    size_bytes: int | None
+    mtime: float | None
+
+
 @dataclass(frozen=True)
 class S3Entry:
     uri: str
@@ -23,6 +40,8 @@ class S3Entry:
     size_bytes: int | None = None
     mtime: float | None = None
     size_complete: bool = False
+    object_count: int | None = None
+    stats_indexed: bool = False
 
 
 @dataclass(frozen=True)
@@ -114,6 +133,36 @@ class AossClientAdapter:
                     mtime = modified.timestamp() if hasattr(modified, "timestamp") else None
                     yield name, False, int(item["Size"]), mtime
 
+    def iter_objects(self, uri: str) -> Iterable[S3Object]:
+        from aoss_client.ceph.ceph import Ceph
+
+        cluster, bucket, key = Ceph.parse_uri(
+            uri, self._mixed._ceph_dict, self._mixed._default_cluster
+        )
+        backend = self._mixed._ceph_dict[cluster]
+        client = backend._s3_resource.meta.client
+        prefix = key or ""
+        if prefix and not prefix.endswith("/"):
+            prefix += "/"
+        paginator = client.get_paginator("list_objects")
+        pages = paginator.paginate(
+            Bucket=bucket,
+            Prefix=prefix,
+            PaginationConfig={"PageSize": 1000},
+        )
+        for page in pages:
+            for item in page.get("Contents", []):
+                object_key = str(item["Key"])
+                if object_key.endswith("/"):
+                    continue
+                modified = item.get("LastModified")
+                mtime = modified.timestamp() if hasattr(modified, "timestamp") else None
+                yield S3Object(
+                    uri=f"s3://{bucket}/{object_key}",
+                    size_bytes=int(item["Size"]),
+                    mtime=mtime,
+                )
+
     def delete(self, uri: str) -> object:
         try:
             from aoss_client.ceph.ceph import Ceph
@@ -140,6 +189,7 @@ class S3Browser:
         cache_ttl: float = 300.0,
         cache_size: int = 512,
         max_workers: int = 256,
+        stats_store: S3StatsStore | None = None,
     ) -> None:
         self._client = client
         self._config_path = config_path
@@ -147,6 +197,7 @@ class S3Browser:
         self.cache_ttl = max(0.0, cache_ttl)
         self.cache_size = max(1, cache_size)
         self.max_workers = max(1, max_workers)
+        self.stats_store = stats_store
         self._cache: OrderedDict[str, tuple[float, tuple[S3Entry, ...]]] = OrderedDict()
         self._cache_lock = threading.Lock()
 
@@ -170,7 +221,7 @@ class S3Browser:
                     cached_entries = cached[1]
             if cached_entries is not None:
                 return S3Listing(
-                    self._with_cached_aggregates(cached_entries), cached=True
+                    self._with_stats(cached_entries), cached=True
                 )
 
         entries_by_uri: dict[str, S3Entry] = {}
@@ -197,6 +248,7 @@ class S3Browser:
                     size_bytes,
                     mtime,
                     not is_dir and size_bytes is not None,
+                    None if is_dir else 1,
                 )
         entries = tuple(
             sorted(entries_by_uri.values(), key=lambda entry: (not entry.is_dir, entry.name.casefold()))
@@ -206,7 +258,35 @@ class S3Browser:
             self._cache.move_to_end(current)
             while len(self._cache) > self.cache_size:
                 self._cache.popitem(last=False)
-        return S3Listing(self._with_cached_aggregates(entries), cached=False)
+        return S3Listing(self._with_stats(entries), cached=False)
+
+    def iter_objects(self, uri: str) -> Iterable[S3Object]:
+        client = self._get_client()
+        iterator = getattr(client, "iter_objects", None)
+        if iterator is None:
+            raise RuntimeError("the configured S3 client does not support recursive listing")
+        yield from iterator(canonical_s3_uri(uri))
+
+    def _with_stats(self, entries: tuple[S3Entry, ...]) -> tuple[S3Entry, ...]:
+        enriched = self._with_cached_aggregates(entries)
+        if self.stats_store is None:
+            return enriched
+        indexed = self.stats_store.get_many(
+            entry.uri for entry in enriched if entry.is_dir
+        )
+        return tuple(
+            replace(
+                entry,
+                size_bytes=int(indexed[entry.uri].size_bytes),
+                mtime=indexed[entry.uri].latest_mtime,
+                size_complete=True,
+                object_count=int(indexed[entry.uri].object_count),
+                stats_indexed=True,
+            )
+            if entry.is_dir and entry.uri in indexed
+            else entry
+            for entry in enriched
+        )
 
     def _with_cached_aggregates(
         self, entries: tuple[S3Entry, ...]
@@ -218,33 +298,46 @@ class S3Browser:
                 for uri, (created_at, cached_entries) in self._cache.items()
                 if now - created_at <= self.cache_ttl
             }
-        memo: dict[str, tuple[int | None, bool, float | None]] = {}
+        memo: dict[str, tuple[int | None, int | None, bool, float | None]] = {}
 
-        def aggregate(uri: str) -> tuple[int | None, bool, float | None]:
+        def aggregate(
+            uri: str,
+        ) -> tuple[int | None, int | None, bool, float | None]:
             if uri in memo:
                 return memo[uri]
             children = cached_listings.get(uri)
             if children is None:
-                return None, False, None
+                return None, None, False, None
             total = 0
+            object_count = 0
             has_known_size = False
+            has_known_count = False
             complete = True
             latest_mtime: float | None = None
             for child in children:
                 if child.is_dir:
-                    size, child_complete, mtime = aggregate(child.uri)
+                    size, count, child_complete, mtime = aggregate(child.uri)
                 else:
                     size = child.size_bytes
+                    count = child.object_count
                     child_complete = child.size_complete
                     mtime = child.mtime
                 if size is not None:
                     total += size
                     has_known_size = True
+                if count is not None:
+                    object_count += count
+                    has_known_count = True
                 if not child_complete:
                     complete = False
                 if mtime is not None:
                     latest_mtime = max(latest_mtime or mtime, mtime)
-            result = (total if has_known_size or complete else None, complete, latest_mtime)
+            result = (
+                total if has_known_size or complete else None,
+                object_count if has_known_count or complete else None,
+                complete,
+                latest_mtime,
+            )
             memo[uri] = result
             return result
 
@@ -253,9 +346,15 @@ class S3Browser:
             if not entry.is_dir:
                 enriched.append(entry)
                 continue
-            size, complete, mtime = aggregate(entry.uri)
+            size, object_count, complete, mtime = aggregate(entry.uri)
             enriched.append(
-                replace(entry, size_bytes=size, mtime=mtime, size_complete=complete)
+                replace(
+                    entry,
+                    size_bytes=size,
+                    mtime=mtime,
+                    size_complete=complete,
+                    object_count=object_count,
+                )
             )
         return tuple(enriched)
 
@@ -291,7 +390,7 @@ class S3Browser:
                 continue
             roots.append(entry)
 
-        objects: list[str] = []
+        objects: list[S3Object] = []
         directories: list[str] = []
         pending = list(roots)
         scanned_dirs = 0
@@ -300,7 +399,7 @@ class S3Browser:
                 raise S3DeleteCancelled("S3 delete cancelled")
             entry = pending.pop()
             if not entry.is_dir:
-                objects.append(entry.uri)
+                objects.append(S3Object(entry.uri, entry.size_bytes, entry.mtime))
                 continue
             directories.append(entry.uri)
             listing = self.list_children(entry.uri, force=True)
@@ -310,25 +409,53 @@ class S3Browser:
                 progress("listing", scanned_dirs, None, entry.uri)
 
         # S3 directories are prefixes, but deleting the marker is harmless when no marker exists.
-        objects.extend(directory.rstrip("/") + "/" for directory in reversed(directories))
+        marker_uris = [
+            directory.rstrip("/") + "/" for directory in reversed(directories)
+        ]
         if cancelled():
             raise S3DeleteCancelled("S3 delete cancelled")
 
         completed = 0
+        deleted_objects: list[S3Object] = []
+        completed_normally = False
         client = self._get_client()
-        with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
-            future_to_uri = {pool.submit(client.delete, uri): uri for uri in objects}
-            for future in as_completed(future_to_uri):
-                uri = future_to_uri[future]
-                if cancelled():
-                    for pending_future in future_to_uri:
-                        pending_future.cancel()
-                    raise S3DeleteCancelled("S3 delete cancelled")
-                future.result()
-                completed += 1
-                if progress is not None:
-                    progress("deleting", completed, len(objects), uri)
-
-        for root in roots:
-            self.invalidate(root.uri)
+        delete_items = [(item.uri, item) for item in objects] + [
+            (uri, None) for uri in marker_uris
+        ]
+        cancellation_requested = False
+        try:
+            with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
+                future_to_item = {
+                    pool.submit(client.delete, uri): (uri, item)
+                    for uri, item in delete_items
+                }
+                for future in as_completed(future_to_item):
+                    uri, item = future_to_item[future]
+                    if cancelled() and not cancellation_requested:
+                        cancellation_requested = True
+                        for pending_future in future_to_item:
+                            pending_future.cancel()
+                    if future.cancelled():
+                        continue
+                    future.result()
+                    completed += 1
+                    if item is not None:
+                        deleted_objects.append(item)
+                    if progress is not None:
+                        progress("deleting", completed, len(delete_items), uri)
+            if cancellation_requested:
+                raise S3DeleteCancelled("S3 delete cancelled")
+            completed_normally = True
+        finally:
+            if self.stats_store is not None and deleted_objects:
+                self.stats_store.apply_deleted(
+                    deleted_objects,
+                    completed_prefixes=(
+                        [root.uri for root in roots if root.is_dir]
+                        if completed_normally
+                        else []
+                    ),
+                )
+            for root in roots:
+                self.invalidate(root.uri)
         return completed
