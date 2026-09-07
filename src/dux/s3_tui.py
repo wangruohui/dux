@@ -16,6 +16,23 @@ def _human_bytes(size: int) -> str:
     return f"{size}B"
 
 
+def _sort_entries(
+    entries: tuple[S3Entry, ...], sort_by: str, reverse: bool
+) -> tuple[S3Entry, ...]:
+    attributes = {
+        "size": "size_bytes",
+        "count": "object_count",
+        "mtime": "mtime",
+    }
+    attribute = attributes[sort_by]
+    known = [entry for entry in entries if getattr(entry, attribute) is not None]
+    missing = [entry for entry in entries if getattr(entry, attribute) is None]
+    known.sort(key=lambda entry: entry.name.casefold())
+    known.sort(key=lambda entry: getattr(entry, attribute), reverse=reverse)
+    missing.sort(key=lambda entry: entry.name.casefold())
+    return tuple(known + missing)
+
+
 def run_s3_ui(
     uri: str,
     workers: int,
@@ -72,6 +89,9 @@ def run_s3_ui(
                 "space": self.app.action_toggle_select,
                 "delete": self.app.action_delete_requested,
                 "x": self.app.action_cancel_delete,
+                "s": self.app.action_sort_size,
+                "c": self.app.action_sort_count,
+                "m": self.app.action_sort_mtime,
                 "q": self.app.action_request_quit,
                 "ctrl+c": self.app.action_request_quit,
             }
@@ -119,6 +139,9 @@ def run_s3_ui(
             Binding("space", "toggle_select", "Select"),
             Binding("delete", "delete_requested", "Delete"),
             Binding("x", "cancel_delete", "Cancel"),
+            Binding("s", "sort_size", "Sort Size"),
+            Binding("c", "sort_count", "Sort Count"),
+            Binding("m", "sort_mtime", "Sort Date"),
         ]
 
         def __init__(self) -> None:
@@ -130,6 +153,9 @@ def run_s3_ui(
             self.entries: tuple[S3Entry, ...] = ()
             self.rows_by_uri: dict[str, S3Entry] = {}
             self.marked_uris: set[str] = set()
+            self.sort_by = "size"
+            self.reverse = True
+            self.last_sort_key: str | None = None
             self.load_generation = 0
             self.delete_active = False
             self.delete_cancel_event: threading.Event | None = None
@@ -192,9 +218,9 @@ def run_s3_ui(
                 self._set_status(f"Unable to list {loaded_uri}: {error}")
                 self.notify(str(error), severity="error")
                 return
-            self.entries = entries
+            self.entries = _sort_entries(entries, self.sort_by, self.reverse)
             focus_row: int | None = None
-            for index, entry in enumerate(entries):
+            for index, entry in enumerate(self.entries):
                 marked = entry.uri in self.marked_uris
                 style = "bold black on yellow" if marked else ""
                 kind = "DIR" if entry.is_dir else "OBJECT"
@@ -221,12 +247,19 @@ def run_s3_ui(
                 self.rows_by_uri[entry.uri] = entry
                 if entry.uri == focus_uri:
                     focus_row = index
-            if not entries:
+            if not self.entries:
                 table.add_row("", "", "", "", "(empty)", key="__empty__")
             if focus_row is not None:
                 table.move_cursor(row=focus_row, column=0, animate=False)
             source = "cache" if cached else "remote"
-            self._set_status(f"{len(entries)} item(s) from {source} | Space select | Delete remove")
+            sort_name = {"size": "size", "count": "objects", "mtime": "date"}[
+                self.sort_by
+            ]
+            direction = "desc" if self.reverse else "asc"
+            self._set_status(
+                f"{len(self.entries)} item(s) from {source} | "
+                f"sort={sort_name} {direction} | unindexed last"
+            )
 
         def _selected_entry(self) -> S3Entry | None:
             table = self.query_one(DataTable)
@@ -299,6 +332,25 @@ def run_s3_ui(
         def action_refresh(self) -> None:
             self.browser.invalidate(self.current_uri)
             self._load_current(force=True)
+
+        def action_sort_size(self) -> None:
+            self._apply_sort("size")
+
+        def action_sort_count(self) -> None:
+            self._apply_sort("count")
+
+        def action_sort_mtime(self) -> None:
+            self._apply_sort("mtime")
+
+        def _apply_sort(self, sort_by: str) -> None:
+            if self.last_sort_key == sort_by:
+                self.reverse = not self.reverse
+            else:
+                self.reverse = True
+            self.sort_by = sort_by
+            self.last_sort_key = sort_by
+            focus = self._selected_entry()
+            self._redraw(focus.uri if focus is not None else None)
 
         def action_delete_requested(self) -> None:
             if self.delete_active:

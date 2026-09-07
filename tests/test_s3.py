@@ -19,7 +19,7 @@ from dux.s3 import (
     s3_parent,
 )
 from dux.s3_index import S3IndexResult, S3IndexStore, index_s3
-from dux.s3_tui import run_s3_ui
+from dux.s3_tui import _sort_entries, run_s3_ui
 
 
 class FakeS3Client:
@@ -49,6 +49,27 @@ class FakeS3Client:
 
 
 class S3BrowserTests(unittest.TestCase):
+    def test_s3_sort_defaults_descending_and_keeps_missing_last(self) -> None:
+        entries = (
+            S3Entry("s3://bucket/missing", "missing", True),
+            S3Entry("s3://bucket/small", "small", True, 10, 100.0, True, 2),
+            S3Entry("s3://bucket/large", "large", True, 30, 300.0, True, 1),
+            S3Entry("s3://bucket/mid", "mid", True, 20, 200.0, True, 3),
+        )
+
+        self.assertEqual(
+            [entry.name for entry in _sort_entries(entries, "size", True)],
+            ["large", "mid", "small", "missing"],
+        )
+        self.assertEqual(
+            [entry.name for entry in _sort_entries(entries, "count", True)],
+            ["mid", "small", "large", "missing"],
+        )
+        self.assertEqual(
+            [entry.name for entry in _sort_entries(entries, "mtime", False)],
+            ["small", "mid", "large", "missing"],
+        )
+
     def test_uri_navigation(self) -> None:
         self.assertEqual(canonical_s3_uri("s3://bucket/a/b/"), "s3://bucket/a/b")
         self.assertEqual(s3_parent("s3://bucket/a/b"), "s3://bucket/a")
@@ -337,6 +358,15 @@ class S3BrowserTests(unittest.TestCase):
                 self.assertEqual(str(file_row[2]), "1")
                 self.assertNotEqual(str(file_row[3]), "-")
 
+                self.assertEqual(app.sort_by, "size")
+                self.assertTrue(app.reverse)
+                await pilot.press("c")
+                self.assertEqual(app.sort_by, "count")
+                self.assertTrue(app.reverse)
+                await pilot.press("c")
+                self.assertFalse(app.reverse)
+
+                table.move_cursor(row=1, column=0, animate=False)
                 await pilot.press("space")
                 self.assertEqual(app.marked_uris, {"s3://bucket/root/folder"})
                 await pilot.press("enter")
