@@ -61,7 +61,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "index" and args.path.startswith("s3://"):
-        browser = S3Browser(max_workers=min(args.workers, 32))
+        browser = S3Browser(max_workers=args.workers)
         store = S3IndexStore(args.db)
 
         def report_s3_progress(
@@ -84,7 +84,7 @@ def main(argv: list[str] | None = None) -> int:
             store,
             progress=report_s3_progress,
             progress_interval=args.progress_interval,
-            workers=min(args.workers, 32),
+            workers=args.workers,
         )
         rate = result.object_count / max(result.scan_seconds, 0.000001)
         print(

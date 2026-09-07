@@ -54,7 +54,7 @@ def run_s3_ui(
         browser
         if browser is not None
         else S3Browser(
-            max_workers=min(workers, 32),
+            max_workers=workers,
             stats_store=S3IndexStore(stats_db_path),
         )
     )

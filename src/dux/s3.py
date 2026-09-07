@@ -3,7 +3,7 @@ from __future__ import annotations
 import threading
 import time
 from collections import OrderedDict
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Iterable, Protocol
@@ -54,6 +54,12 @@ class S3DeleteCancelled(RuntimeError):
     pass
 
 
+class S3BatchDeleteError(RuntimeError):
+    def __init__(self, message: str, deleted_uris: Iterable[str] = ()) -> None:
+        super().__init__(message)
+        self.deleted_uris = tuple(deleted_uris)
+
+
 def canonical_s3_uri(uri: str) -> str:
     if not uri.startswith("s3://"):
         raise ValueError(f"not an S3 URI: {uri}")
@@ -97,6 +103,11 @@ class AossClientAdapter:
     def list_with_info(
         self, uri: str
     ) -> Iterable[tuple[str, bool, int | None, float | None]]:
+        yield from self.list_with_info_cancelable(uri, None)
+
+    def list_with_info_cancelable(
+        self, uri: str, cancel_event: threading.Event | None
+    ) -> Iterable[tuple[str, bool, int | None, float | None]]:
         # Client.list() discards Size, so retain it from the same delimiter-based request.
         try:
             from aoss_client.ceph.ceph import Ceph
@@ -122,6 +133,8 @@ class AossClientAdapter:
             PaginationConfig={"PageSize": 1000},
         )
         for page in pages:
+            if cancel_event is not None and cancel_event.is_set():
+                raise S3DeleteCancelled("S3 delete cancelled")
             for item in page.get("CommonPrefixes", []):
                 name = str(item["Prefix"])[len(prefix) :].rstrip("/")
                 if name:
@@ -175,6 +188,42 @@ class AossClientAdapter:
         except (AttributeError, KeyError):
             return self._client.delete(uri)
 
+    def delete_many(self, uris: Iterable[str]) -> tuple[str, ...]:
+        from aoss_client.ceph.ceph import Ceph
+
+        grouped: dict[tuple[object, str], list[tuple[str, str]]] = {}
+        for uri in uris:
+            cluster, bucket, key = Ceph.parse_uri(
+                uri, self._mixed._ceph_dict, self._mixed._default_cluster
+            )
+            backend = self._mixed._ceph_dict[cluster]
+            client = backend._s3_resource.meta.client
+            grouped.setdefault((client, bucket), []).append((uri, key))
+
+        deleted: list[str] = []
+        errors: list[str] = []
+        for (client, bucket), items in grouped.items():
+            response = client.delete_objects(
+                Bucket=bucket,
+                Delete={"Objects": [{"Key": key} for _, key in items], "Quiet": False},
+            )
+            uri_by_key = {key: uri for uri, key in items}
+            deleted.extend(
+                uri_by_key[str(item["Key"])]
+                for item in response.get("Deleted", [])
+                if str(item.get("Key")) in uri_by_key
+            )
+            errors.extend(
+                f"{item.get('Key')}: {item.get('Code', 'unknown')}"
+                for item in response.get("Errors", [])
+            )
+        if errors:
+            raise S3BatchDeleteError(
+                f"S3 batch delete failed for {len(errors)} object(s): {errors[0]}",
+                deleted,
+            )
+        return tuple(deleted)
+
 
 def create_aoss_client(config_path: str | Path | None = None) -> S3Client:
     return AossClientAdapter(config_path)
@@ -209,7 +258,13 @@ class S3Browser:
                 self._client = create_aoss_client(self._config_path)
             return self._client
 
-    def list_children(self, uri: str, *, force: bool = False) -> S3Listing:
+    def list_children(
+        self,
+        uri: str,
+        *,
+        force: bool = False,
+        cancel_event: threading.Event | None = None,
+    ) -> S3Listing:
         current = canonical_s3_uri(uri)
         now = time.monotonic()
         if not force:
@@ -226,8 +281,11 @@ class S3Browser:
 
         entries_by_uri: dict[str, S3Entry] = {}
         client = self._get_client()
+        cancelable_listing = getattr(client, "list_with_info_cancelable", None)
         list_with_info = getattr(client, "list_with_info", None)
-        if list_with_info is None:
+        if cancel_event is not None and cancelable_listing is not None:
+            raw_entries = cancelable_listing(current, cancel_event)
+        elif list_with_info is None:
             raw_entries = (
                 (str(name), str(name).endswith("/"), None, None)
                 for name in client.list(current)
@@ -235,6 +293,8 @@ class S3Browser:
         else:
             raw_entries = list_with_info(current)
         for raw_name, is_dir, size_bytes, mtime in raw_entries:
+            if cancel_event is not None and cancel_event.is_set():
+                raise S3DeleteCancelled("S3 delete cancelled")
             name = str(raw_name).rstrip("/")
             if not name:
                 continue
@@ -390,23 +450,51 @@ class S3Browser:
                 continue
             roots.append(entry)
 
-        objects: list[S3Object] = []
-        directories: list[str] = []
-        pending = list(roots)
+        objects: list[S3Object] = [
+            S3Object(root.uri, root.size_bytes, root.mtime)
+            for root in roots
+            if not root.is_dir
+        ]
+        directories: list[str] = [root.uri for root in roots if root.is_dir]
         scanned_dirs = 0
-        while pending:
-            if cancelled():
-                raise S3DeleteCancelled("S3 delete cancelled")
-            entry = pending.pop()
-            if not entry.is_dir:
-                objects.append(S3Object(entry.uri, entry.size_bytes, entry.mtime))
-                continue
-            directories.append(entry.uri)
-            listing = self.list_children(entry.uri, force=True)
-            pending.extend(listing.entries)
-            scanned_dirs += 1
-            if progress is not None:
-                progress("listing", scanned_dirs, None, entry.uri)
+        with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
+            pending = {
+                pool.submit(
+                    self.list_children,
+                    root.uri,
+                    force=True,
+                    cancel_event=cancel_event,
+                ): root.uri
+                for root in roots
+                if root.is_dir
+            }
+            while pending:
+                if cancelled():
+                    for future in pending:
+                        future.cancel()
+                    raise S3DeleteCancelled("S3 delete cancelled")
+                done, _ = wait(pending, return_when=FIRST_COMPLETED)
+                for future in done:
+                    current = pending.pop(future)
+                    listing = future.result()
+                    scanned_dirs += 1
+                    if progress is not None:
+                        progress("listing", scanned_dirs, None, current)
+                    for entry in listing.entries:
+                        if entry.is_dir:
+                            directories.append(entry.uri)
+                            pending[
+                                pool.submit(
+                                    self.list_children,
+                                    entry.uri,
+                                    force=True,
+                                    cancel_event=cancel_event,
+                                )
+                            ] = entry.uri
+                        else:
+                            objects.append(
+                                S3Object(entry.uri, entry.size_bytes, entry.mtime)
+                            )
 
         # S3 directories are prefixes, but deleting the marker is harmless when no marker exists.
         marker_uris = [
@@ -419,32 +507,62 @@ class S3Browser:
         deleted_objects: list[S3Object] = []
         completed_normally = False
         client = self._get_client()
-        delete_items = [(item.uri, item) for item in objects] + [
-            (uri, None) for uri in marker_uris
+        items_by_uri = {item.uri: item for item in objects}
+        delete_uris = [item.uri for item in objects] + marker_uris
+        batches = [
+            delete_uris[offset : offset + 1000]
+            for offset in range(0, len(delete_uris), 1000)
         ]
+        delete_many = getattr(client, "delete_many", None)
+
+        def delete_batch(batch: list[str]) -> tuple[str, ...]:
+            if delete_many is not None:
+                return tuple(delete_many(batch))
+            for target in batch:
+                if cancelled():
+                    raise S3DeleteCancelled("S3 delete cancelled")
+                client.delete(target)
+            return tuple(batch)
+
         cancellation_requested = False
+        first_error: BaseException | None = None
         try:
             with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
-                future_to_item = {
-                    pool.submit(client.delete, uri): (uri, item)
-                    for uri, item in delete_items
+                future_to_batch = {
+                    pool.submit(delete_batch, batch): batch
+                    for batch in batches
                 }
-                for future in as_completed(future_to_item):
-                    uri, item = future_to_item[future]
+                for future in as_completed(future_to_batch):
                     if cancelled() and not cancellation_requested:
                         cancellation_requested = True
-                        for pending_future in future_to_item:
+                        for pending_future in future_to_batch:
                             pending_future.cancel()
                     if future.cancelled():
                         continue
-                    future.result()
-                    completed += 1
-                    if item is not None:
-                        deleted_objects.append(item)
+                    try:
+                        deleted_uris = future.result()
+                    except S3BatchDeleteError as exc:
+                        deleted_uris = exc.deleted_uris
+                        first_error = first_error or exc
+                    except S3DeleteCancelled:
+                        cancellation_requested = True
+                        continue
+                    for target in deleted_uris:
+                        item = items_by_uri.get(target)
+                        if item is not None:
+                            deleted_objects.append(item)
+                    completed += len(deleted_uris)
                     if progress is not None:
-                        progress("deleting", completed, len(delete_items), uri)
+                        progress(
+                            "deleting",
+                            completed,
+                            len(delete_uris),
+                            deleted_uris[-1] if deleted_uris else "",
+                        )
             if cancellation_requested:
                 raise S3DeleteCancelled("S3 delete cancelled")
+            if first_error is not None:
+                raise first_error
             completed_normally = True
         finally:
             if self.stats_store is not None and deleted_objects:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import tempfile
 import threading
+import time
 import unittest
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -12,6 +13,7 @@ from unittest.mock import patch
 from dux.cli import main
 from dux.s3 import (
     AossClientAdapter,
+    S3DeleteCancelled,
     S3Browser,
     S3Entry,
     S3Object,
@@ -29,6 +31,7 @@ class FakeS3Client:
         ] = {}
         self.list_calls: list[str] = []
         self.deleted: list[str] = []
+        self.delete_batches: list[tuple[str, ...]] = []
         self.objects: dict[str, list[S3Object]] = {}
 
     def list(self, uri: str):
@@ -43,6 +46,12 @@ class FakeS3Client:
 
     def delete(self, uri: str) -> None:
         self.deleted.append(uri)
+
+    def delete_many(self, uris):
+        batch = tuple(uris)
+        self.delete_batches.append(batch)
+        self.deleted.extend(batch)
+        return batch
 
     def iter_objects(self, uri: str):
         return iter(self.objects[uri])
@@ -225,6 +234,72 @@ class S3BrowserTests(unittest.TestCase):
         self.assertTrue(any(item[0] == "listing" for item in progress))
         self.assertTrue(any(item[0] == "deleting" for item in progress))
 
+    def test_recursive_delete_lists_directories_concurrently(self) -> None:
+        class ConcurrentFakeS3Client(FakeS3Client):
+            def __init__(self) -> None:
+                super().__init__()
+                self.active = 0
+                self.max_active = 0
+                self.lock = threading.Lock()
+
+            def list_with_info(self, uri: str):
+                if uri != "s3://bucket/root":
+                    with self.lock:
+                        self.active += 1
+                        self.max_active = max(self.max_active, self.active)
+                    time.sleep(0.03)
+                    with self.lock:
+                        self.active -= 1
+                return super().list_with_info(uri)
+
+        client = ConcurrentFakeS3Client()
+        client.listings["s3://bucket/root"] = [
+            ("a", True, None, None),
+            ("b", True, None, None),
+        ]
+        client.listings["s3://bucket/root/a"] = [("a.bin", False, 1, 1.0)]
+        client.listings["s3://bucket/root/b"] = [("b.bin", False, 1, 1.0)]
+
+        S3Browser(client, max_workers=2).delete_entries(
+            [S3Entry("s3://bucket/root", "root", True)]
+        )
+
+        self.assertEqual(client.max_active, 2)
+
+    def test_recursive_delete_batches_one_thousand_keys(self) -> None:
+        client = FakeS3Client()
+        client.listings["s3://bucket/root"] = [
+            (f"file-{index}", False, 1, 1.0) for index in range(2001)
+        ]
+
+        deleted = S3Browser(client, max_workers=4).delete_entries(
+            [S3Entry("s3://bucket/root", "root", True)]
+        )
+
+        self.assertEqual(deleted, 2002)
+        self.assertEqual([len(batch) for batch in client.delete_batches], [1000, 1000, 2])
+
+    def test_delete_cancels_during_listing(self) -> None:
+        class CancelableFakeS3Client(FakeS3Client):
+            def __init__(self, cancel_event: threading.Event) -> None:
+                super().__init__()
+                self.cancel_event = cancel_event
+
+            def list_with_info_cancelable(self, uri: str, cancel_event: threading.Event):
+                yield "first.bin", False, 1, 1.0
+                self.cancel_event.set()
+                if cancel_event.is_set():
+                    raise S3DeleteCancelled("S3 delete cancelled")
+
+        cancel_event = threading.Event()
+        client = CancelableFakeS3Client(cancel_event)
+        with self.assertRaises(S3DeleteCancelled):
+            S3Browser(client, max_workers=4).delete_entries(
+                [S3Entry("s3://bucket/root", "root", True)],
+                cancel_event=cancel_event,
+            )
+        self.assertEqual(client.deleted, [])
+
     def test_delete_invalidates_parent_listing_cache(self) -> None:
         client = FakeS3Client()
         client.listings["s3://bucket/root"] = [("file.bin", False, 10, 100.0)]
@@ -324,8 +399,8 @@ class S3BrowserTests(unittest.TestCase):
             self.assertEqual(main(["index", "s3://bucket"]), 0)
 
         scan.assert_called_once()
-        self.assertEqual(scan.call_args.kwargs["workers"], 32)
-        browser_type.assert_called_once_with(max_workers=32)
+        self.assertEqual(scan.call_args.kwargs["workers"], 256)
+        browser_type.assert_called_once_with(max_workers=256)
         store_type.assert_called_once_with(None)
 
     def test_tui_lists_sizes_selects_and_navigates(self) -> None:
