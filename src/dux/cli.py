@@ -84,6 +84,7 @@ def main(argv: list[str] | None = None) -> int:
             store,
             progress=report_s3_progress,
             progress_interval=args.progress_interval,
+            workers=min(args.workers, 32),
         )
         rate = result.object_count / max(result.scan_seconds, 0.000001)
         print(

@@ -117,9 +117,9 @@ Build exact recursive prefix statistics with one streaming object-list pass:
 dux index s3://example-bucket
 ```
 
-S3 statistics are stored in `~/.cache/dux/s3.db` by default. The index stores one row per prefix, not one row per object. Progress reports object throughput every 10,000 objects; `--progress-interval` changes that interval, and `--db` selects another statistics database.
+S3 statistics are stored in `~/.cache/dux/s3.db` by default. The index stores one row per prefix, not one row per object. The scanner expands the tree into non-overlapping prefix shards and lists up to 32 shards concurrently while counting every object exactly once. Progress reports object throughput every 10,000 objects; `--progress-interval` changes that interval, `--workers` controls concurrency up to 32, and `--db` selects another statistics database.
 
-S3 统计默认保存在 `~/.cache/dux/s3.db`。索引只为每个 prefix 保存一行，不会为每个对象保存记录。扫描时每 10000 个对象输出一次吞吐；可用 `--progress-interval` 调整间隔，用 `--db` 指定其他统计数据库。
+S3 统计默认保存在 `~/.cache/dux/s3.db`。索引只为每个 prefix 保存一行，不会为每个对象保存记录。扫描器会把目录树展开为互不重叠的 prefix shard，最多并行扫描 32 个 shard，同时保证每个对象只计一次。扫描时每 10000 个对象输出一次吞吐；可用 `--progress-interval` 调整间隔，`--workers` 控制不超过 32 的并发，用 `--db` 指定其他统计数据库。
 
 S3 mode lists every page of the current prefix; a page contains up to 1,000 entries. Direct objects show the size and modification time returned by the same listing request. Exact `dux index` statistics take priority for directory size and object count. Without an exact index, returning after visiting a directory shows its cached recursive size: `>=` means some child prefixes remain unvisited, while a plain value is exact for the cached tree. No implicit recursive scan is started. `Enter`/`Right`, `Backspace`, and `Alt+Left/Right` navigate; `Space` selects, `Delete` confirms permanent removal, `r` bypasses the five-minute in-memory cache, and `x` cancels deletion. Successfully deleted objects are deducted from the persistent index even when cancellation interrupts the remaining work; related listing caches are then invalidated.
 

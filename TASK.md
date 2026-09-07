@@ -6,14 +6,16 @@
 
 锁定对象：`/mnt/afs/wangruohui/tools/dux`；不读取或修改凭据内容，不改变本地文件系统 UI 行为。
 
-阶段：DOING，实现持久 S3 索引。
+阶段：DOING，单路基线运行中，并行优化已完成测试。
 
 下一步：完成测试后运行 `dux index s3://wangruohui`，依据分段耗时优化并复验。
 
 - DONE：实现单遍对象流扫描和 prefix 聚合。
 - DONE：持久化到 `~/.cache/dux/s3.db` 并接入 S3 UI。
 - DONE：删除和取消同步已完成对象到统计库。
-- TODO：真实扫描、性能分析和必要优化。
+- DONE：真实单路扫描确认瓶颈为远端 paginator；79 万对象时累计约 2.1k objects/s，SQLite 尚未参与。
+- DONE：实现最多 32 个互斥 prefix shard 的并行扫描，不重不漏测试通过。
+- TODO：切换到并行版本完成真实扫描，并核对最终数据库聚合。
 - TODO：完整验证、README、提交推送。
 
 ## 已完成的 S3 Viewer 元数据与缓存聚合

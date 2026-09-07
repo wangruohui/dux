@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 import time
 from contextlib import closing
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable
@@ -180,15 +182,18 @@ def index_s3(
     *,
     progress: Callable[[int, int, str, float], None] | None = None,
     progress_interval: int = 10000,
+    workers: int = 1,
 ) -> S3IndexResult:
     root = canonical_s3_uri(root_uri)
     aggregates: dict[str, list[int | float | None]] = {
         root: [0, 0, None]
     }
     started_at = time.monotonic()
-    object_count = 0
-    for item in browser.iter_objects(root):
-        object_count += 1
+    workers = max(1, workers)
+
+    def add_object(
+        target: dict[str, list[int | float | None]], item: S3Object
+    ) -> None:
         relative = item.uri[len(root) :].lstrip("/")
         components = relative.split("/")
         prefixes = [root]
@@ -203,17 +208,88 @@ def index_s3(
             if item.mtime is not None:
                 previous = aggregate[2]
                 aggregate[2] = max(float(previous or item.mtime), item.mtime)
-        if (
-            progress is not None
-            and progress_interval > 0
-            and object_count % progress_interval == 0
-        ):
-            progress(
-                object_count,
-                len(aggregates),
-                item.uri,
-                time.monotonic() - started_at,
-            )
+
+    object_count = 0
+    next_report = progress_interval
+    progress_lock = threading.Lock()
+    known_prefixes: set[str] = {root}
+
+    def record_progress(
+        count: int,
+        prefixes: Iterable[str],
+        current: str,
+    ) -> None:
+        nonlocal object_count, next_report
+        with progress_lock:
+            object_count += count
+            known_prefixes.update(prefixes)
+            if (
+                progress is not None
+                and progress_interval > 0
+                and object_count >= next_report
+            ):
+                progress(
+                    object_count,
+                    len(known_prefixes),
+                    current,
+                    time.monotonic() - started_at,
+                )
+                next_report = ((object_count // progress_interval) + 1) * progress_interval
+
+    def scan_shard(shard: str) -> dict[str, list[int | float | None]]:
+        local: dict[str, list[int | float | None]] = {}
+        pending_count = 0
+        current = shard
+        for item in browser.iter_objects(shard):
+            add_object(local, item)
+            pending_count += 1
+            current = item.uri
+            if pending_count >= 1000:
+                record_progress(pending_count, local.keys(), current)
+                pending_count = 0
+        if pending_count:
+            record_progress(pending_count, local.keys(), current)
+        return local
+
+    def merge(source: dict[str, list[int | float | None]]) -> None:
+        for uri, values in source.items():
+            aggregate = aggregates.setdefault(uri, [0, 0, None])
+            aggregate[0] = int(aggregate[0]) + int(values[0])
+            aggregate[1] = int(aggregate[1]) + int(values[1])
+            if values[2] is not None:
+                previous = aggregate[2]
+                aggregate[2] = max(float(previous or values[2]), float(values[2]))
+
+    if workers == 1:
+        merge(scan_shard(root))
+    else:
+        frontier = [root]
+        for _depth in range(3):
+            if len(frontier) >= workers:
+                break
+            batch = frontier
+            frontier = []
+            with ThreadPoolExecutor(max_workers=min(workers, len(batch))) as pool:
+                futures = [
+                    pool.submit(browser.list_children, prefix, force=True)
+                    for prefix in batch
+                ]
+                for future in as_completed(futures):
+                    listing = future.result()
+                    for entry in listing.entries:
+                        if entry.is_dir:
+                            frontier.append(entry.uri)
+                        else:
+                            item = S3Object(entry.uri, entry.size_bytes, entry.mtime)
+                            add_object(aggregates, item)
+                            record_progress(1, aggregates.keys(), entry.uri)
+            if not frontier:
+                break
+
+        with ThreadPoolExecutor(max_workers=min(workers, len(frontier) or 1)) as pool:
+            futures = [pool.submit(scan_shard, shard) for shard in frontier]
+            for future in as_completed(futures):
+                merge(future.result())
 
     scan_seconds = time.monotonic() - started_at
     stats = [

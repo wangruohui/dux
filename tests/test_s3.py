@@ -270,6 +270,31 @@ class S3BrowserTests(unittest.TestCase):
             self.assertEqual((updated["s3://bucket/a"].size_bytes, updated["s3://bucket/a"].object_count), (20, 1))
             self.assertNotIn("s3://bucket/a/b", updated)
 
+    def test_parallel_index_shards_prefixes_without_double_counting(self) -> None:
+        client = FakeS3Client()
+        client.listings["s3://bucket"] = [
+            ("a", True, None, None),
+            ("b", True, None, None),
+        ]
+        client.objects["s3://bucket/a"] = [
+            S3Object("s3://bucket/a/one.bin", 10, 100.0)
+        ]
+        client.objects["s3://bucket/b"] = [
+            S3Object("s3://bucket/b/two.bin", 20, 200.0)
+        ]
+        browser = S3Browser(client)
+        with tempfile.TemporaryDirectory() as directory:
+            store = S3IndexStore(Path(directory) / "s3.db")
+            result = index_s3(browser, "s3://bucket", store, workers=2)
+
+            self.assertEqual((result.object_count, result.size_bytes), (2, 30))
+            stats = store.get_many(
+                ["s3://bucket", "s3://bucket/a", "s3://bucket/b"]
+            )
+            self.assertEqual(stats["s3://bucket"].size_bytes, 30)
+            self.assertEqual(stats["s3://bucket/a"].size_bytes, 10)
+            self.assertEqual(stats["s3://bucket/b"].size_bytes, 20)
+
     def test_cli_routes_s3_index_without_local_scanner(self) -> None:
         result = S3IndexResult("s3://bucket", 1, 1, 10, 1.0, 0.1)
         with patch("dux.cli.S3Browser") as browser_type, patch(
@@ -278,6 +303,7 @@ class S3BrowserTests(unittest.TestCase):
             self.assertEqual(main(["index", "s3://bucket"]), 0)
 
         scan.assert_called_once()
+        self.assertEqual(scan.call_args.kwargs["workers"], 32)
         browser_type.assert_called_once_with(max_workers=32)
         store_type.assert_called_once_with(None)
 
