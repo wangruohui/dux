@@ -266,7 +266,7 @@ class S3BrowserTests(unittest.TestCase):
 
         self.assertEqual(client.max_active, 2)
 
-    def test_recursive_delete_batches_one_thousand_keys(self) -> None:
+    def test_recursive_delete_uses_bounded_batches(self) -> None:
         client = FakeS3Client()
         client.listings["s3://bucket/root"] = [
             (f"file-{index}", False, 1, 1.0) for index in range(2001)
@@ -277,7 +277,10 @@ class S3BrowserTests(unittest.TestCase):
         )
 
         self.assertEqual(deleted, 2002)
-        self.assertEqual([len(batch) for batch in client.delete_batches], [1000, 1000, 2])
+        self.assertEqual(
+            [len(batch) for batch in client.delete_batches],
+            [500, 500, 500, 500, 2],
+        )
 
     def test_delete_cancels_during_listing(self) -> None:
         class CancelableFakeS3Client(FakeS3Client):
@@ -331,7 +334,7 @@ class S3BrowserTests(unittest.TestCase):
         with patch("dux.cli.run_s3_ui") as run_s3, patch("dux.cli.run_ui") as run_local:
             self.assertEqual(main(["ui", "s3://bucket/root"]), 0)
 
-        run_s3.assert_called_once_with("s3://bucket/root", 256, stats_db_path=None)
+        run_s3.assert_called_once_with("s3://bucket/root", 64, stats_db_path=None)
         run_local.assert_not_called()
 
     def test_index_aggregates_prefixes_and_delete_updates_stats(self) -> None:
@@ -399,8 +402,8 @@ class S3BrowserTests(unittest.TestCase):
             self.assertEqual(main(["index", "s3://bucket"]), 0)
 
         scan.assert_called_once()
-        self.assertEqual(scan.call_args.kwargs["workers"], 256)
-        browser_type.assert_called_once_with(max_workers=256)
+        self.assertEqual(scan.call_args.kwargs["workers"], 64)
+        browser_type.assert_called_once_with(max_workers=64)
         store_type.assert_called_once_with(None)
 
     def test_tui_lists_sizes_selects_and_navigates(self) -> None:
@@ -419,6 +422,8 @@ class S3BrowserTests(unittest.TestCase):
             run_s3_ui("s3://bucket/root", 256, browser=browser)
         app, run_options = apps[0]
         self.assertIs(run_options["mouse"], False)
+        bindings = {(binding.key, binding.action) for binding in app.BINDINGS}
+        self.assertIn(("shift+x", "cancel_delete"), bindings)
 
         async def exercise() -> None:
             async with app.run_test(size=(100, 30)) as pilot:
@@ -458,6 +463,16 @@ class S3BrowserTests(unittest.TestCase):
                 )
 
         asyncio.run(exercise())
+
+    def test_cli_s3_workers_can_override_default(self) -> None:
+        with patch("dux.cli.run_s3_ui") as run_s3:
+            self.assertEqual(
+                main(["--workers", "128", "ui", "s3://bucket/root"]),
+                0,
+            )
+        run_s3.assert_called_once_with(
+            "s3://bucket/root", 128, stats_db_path=None
+        )
 
 
 if __name__ == "__main__":

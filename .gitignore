@@ -209,6 +209,9 @@ tempCodeRunnerFile.py
 # PyPI configuration file
 .pypirc
 
+# Local benchmark and long-running task output
+.runs/
+
 # Marimo
 marimo/_static/
 marimo/_lsp/

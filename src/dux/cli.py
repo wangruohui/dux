@@ -25,7 +25,12 @@ def _human_bytes(size: int) -> str:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="dux")
     parser.add_argument("--db", default=None, help="path to sqlite database")
-    parser.add_argument("--workers", type=int, default=256, help="scanner worker threads (default: 256)")
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help="worker threads (default: 256 local, 64 S3)",
+    )
     parser.add_argument("--progress-interval", type=int, default=10000, help="print one scanned file path per N files")
 
     sub = parser.add_subparsers(dest="command", required=True)
@@ -52,16 +57,18 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    is_s3 = args.path.startswith("s3://")
+    workers = args.workers if args.workers is not None else (64 if is_s3 else 256)
 
     if args.command == "ui":
-        if args.path.startswith("s3://"):
-            run_s3_ui(args.path, args.workers, stats_db_path=args.db)
+        if is_s3:
+            run_s3_ui(args.path, workers, stats_db_path=args.db)
         else:
-            run_ui(args.db, args.path, args.workers)
+            run_ui(args.db, args.path, workers)
         return 0
 
-    if args.command == "index" and args.path.startswith("s3://"):
-        browser = S3Browser(max_workers=args.workers)
+    if args.command == "index" and is_s3:
+        browser = S3Browser(max_workers=workers)
         store = S3IndexStore(args.db)
 
         def report_s3_progress(
@@ -84,7 +91,7 @@ def main(argv: list[str] | None = None) -> int:
             store,
             progress=report_s3_progress,
             progress_interval=args.progress_interval,
-            workers=args.workers,
+            workers=workers,
         )
         rate = result.object_count / max(result.scan_seconds, 0.000001)
         print(
@@ -97,7 +104,7 @@ def main(argv: list[str] | None = None) -> int:
 
     service = DuxService(
         db_path=args.db,
-        max_workers=args.workers,
+        max_workers=workers,
         read_only=args.command == "ls",
     )
     try:

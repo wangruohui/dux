@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from dux.cli import build_parser
+from dux.cli import build_parser, main
 from dux.service import DuxService, FilterEntry
 from dux.tui import run_ui
 
@@ -18,7 +18,18 @@ from dux.tui import run_ui
 class CliTests(unittest.TestCase):
     def test_default_scanner_workers(self) -> None:
         args = build_parser().parse_args(["index", "/tmp"])
-        self.assertEqual(args.workers, 256)
+        self.assertIsNone(args.workers)
+        with patch("dux.cli.DuxService") as service_type:
+            service_type.return_value.readonly_warning = None
+            service_type.return_value.index_path.return_value.root.path = "/tmp"
+            service_type.return_value.index_path.return_value.root.size_bytes = 0
+            service_type.return_value.index_path.return_value.root.file_count = 0
+            service_type.return_value.index_path.return_value.root.dir_count = 0
+            service_type.return_value.index_path.return_value.scan.elapsed_seconds = 1.0
+            service_type.return_value.index_path.return_value.scan.scanned_files = 0
+            service_type.return_value.index_path.return_value.scan.scanned_dirs = 0
+            self.assertEqual(main(["index", "/tmp"]), 0)
+        self.assertEqual(service_type.call_args.kwargs["max_workers"], 256)
 
     def test_ui_startup_does_not_write_navigation_placeholders(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

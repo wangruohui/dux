@@ -6,9 +6,9 @@
 
 锁定对象：`/mnt/afs/wangruohui/tools/dux`；不读取或修改凭据内容，不改变本地文件系统 UI 行为。
 
-阶段：DOING，优化 S3 并行 listing、批量删除和取消响应。
+阶段：DONE，S3 并行 listing、批量删除、取消响应和真实消融均已完成。
 
-下一步：完成无破坏测试后，用用户指定的两个 prefix 做真实删除性能验证。
+下一步：无。
 
 - DONE：实现单遍对象流扫描和 prefix 聚合。
 - DONE：持久化到 `~/.cache/dux/s3.db` 并接入 S3 UI。
@@ -19,7 +19,9 @@
 - DONE：`~/.cache/dux/s3.db` 完整性检查为 `ok`；顶层目录聚合与根节点一致，差额为 bucket 根部 3 个直接对象。
 - DONE：完整验证、README、提交推送。
 - DONE：S3 浏览页支持大小、对象数、日期双向排序，默认按大小降序；S3 专项 14 项和完整 54 项测试通过。
-- DOING：S3 listing 和删除并发提高到默认 256，批量删除每次最多 1000 个 key，并修复 `x` 在 listing/提交阶段不能及时取消。
+- DONE：S3 递归 listing 并行化；删除使用批量 API；`x`/`Shift+X` 在 listing 和删除阶段均可取消，并同步已完成部分。
+- DONE：真实限量消融删除 29,800 个对象且全部成功；采用 S3 默认 64 workers、500 keys/batch，本地默认 256 不变。
+- DONE：数据库完整性为 `ok`，测试 prefix 对象数精确扣减 29,800；完整 58 项测试通过。
 
 ## 已完成的 S3 Viewer 元数据与缓存聚合
 

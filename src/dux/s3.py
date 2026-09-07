@@ -60,6 +60,9 @@ class S3BatchDeleteError(RuntimeError):
         self.deleted_uris = tuple(deleted_uris)
 
 
+S3_DELETE_BATCH_SIZE = 500
+
+
 def canonical_s3_uri(uri: str) -> str:
     if not uri.startswith("s3://"):
         raise ValueError(f"not an S3 URI: {uri}")
@@ -510,8 +513,8 @@ class S3Browser:
         items_by_uri = {item.uri: item for item in objects}
         delete_uris = [item.uri for item in objects] + marker_uris
         batches = [
-            delete_uris[offset : offset + 1000]
-            for offset in range(0, len(delete_uris), 1000)
+            delete_uris[offset : offset + S3_DELETE_BATCH_SIZE]
+            for offset in range(0, len(delete_uris), S3_DELETE_BATCH_SIZE)
         ]
         delete_many = getattr(client, "delete_many", None)
 
