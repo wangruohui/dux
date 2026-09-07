@@ -8,13 +8,13 @@
 
 阶段：DONE。
 
-下一步：提交并推送；如后续需要，再单独增加按需 prefix 递归统计。
+下一步：如后续需要，再单独增加按需 prefix 递归统计。
 
 - DONE：实现 `dux ui s3://bucket/prefix`，支持后台单层浏览、对象大小、导航和缓存。
 - DONE：实现当前页多选、确认、后台递归并行删除和取消。
 - DONE：安装本机 AOSS SDK；首次 client 初始化移至后台并复用低层 S3 client。
 - DONE：更新双语 README；静态编译、CLI help、8 项 S3 测试和完整 48 项测试通过。
-- TODO：提交并推送。
+- DONE：功能提交完成并推送到 `origin/main`。
 
 ---
 
