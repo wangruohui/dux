@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 
 from .service import DuxService
+from .s3_tui import run_s3_ui
 from .tui import run_ui
 
 
@@ -51,7 +52,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.command == "ui":
-        run_ui(args.db, args.path, args.workers)
+        if args.path.startswith("s3://"):
+            run_s3_ui(args.path, args.workers)
+        else:
+            run_ui(args.db, args.path, args.workers)
         return 0
 
     service = DuxService(

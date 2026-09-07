@@ -41,6 +41,8 @@ s size  c count  m date  n name  r refresh  f filter  x cancel filter/refresh/de
 - **所有列表均可双向排序**：浏览页和筛选结果页支持大小、递归文件数、日期、名称排序；再次按当前排序键即可反转顺序，未统计项始终置后。
 - **Responsive, cancellable background work**: press `x` to cancel an active filter, refresh, or the latest delete job. Multiple delete jobs and per-tree workers share bounded concurrency and continuously flush successful removals to SQLite.
 - **响应式、可取消后台任务**：按 `x` 可取消正在运行的筛选、刷新或最近一次删除任务。多个删除任务与目录内部 worker 共享受控并发，成功删除会持续同步 SQLite。
+- **Instant S3 viewer**: open `s3://bucket/prefix` without building an index. Browse one prefix at a time with a bounded TTL cache, see direct object sizes, select rows, and permanently delete objects or prefixes in the background.
+- **即时 S3 浏览**：无需建立索引即可打开 `s3://bucket/prefix`。按层浏览并使用有界 TTL 缓存，显示当前层对象大小，支持选择并在后台永久删除对象或 prefix。
 
 ## Highlights / 亮点
 
@@ -99,6 +101,18 @@ Open the terminal UI:
 dux ui /data/project
 ```
 
+Browse S3 without indexing (requires a compatible `aoss_client` installation and `~/aoss.conf`):
+
+无需索引即可浏览 S3（需要安装兼容的 `aoss_client` 并配置 `~/aoss.conf`）：
+
+```bash
+dux ui s3://example-bucket/project
+```
+
+S3 mode lists only the current prefix. Direct objects show the size returned by the listing request; directory prefixes show `-` and are never recursively measured. `Enter`/`Right`, `Backspace`, and `Alt+Left/Right` navigate; `Space` selects, `Delete` confirms permanent removal, `r` bypasses the five-minute in-memory cache, and `x` cancels deletion.
+
+S3 模式只列出当前 prefix。普通对象显示 list 请求直接返回的大小，目录 prefix 显示 `-`，不会递归统计。使用 `Enter`/`Right`、`Backspace` 和 `Alt+Left/Right` 导航；`Space` 选择，`Delete` 确认永久删除，`r` 绕过五分钟内存缓存，`x` 取消删除。
+
 List children from the CLI:
 
 在命令行列出子目录/文件：
@@ -146,8 +160,8 @@ dux --workers 16 index /data/project
 
 ## UI Controls / UI 快捷键
 
-- `Enter` / `Right`: open the selected directory, or show a read-only preview of the first 1 KiB when the selected item is a file. Press `Esc` or `q` to close the preview.
-- `Enter` / `Right`：进入选中的目录；如果选中的是文件，则只读预览前 1 KiB 内容。按 `Esc` 或 `q` 关闭预览。
+- `Enter` / `Right`: open the selected directory, or show a read-only preview of the first 1 KiB when the selected item is a file. Press `Backspace` or `Esc` to close the preview.
+- `Enter` / `Right`：进入选中的目录；如果选中的是文件，则只读预览前 1 KiB 内容。按 `Backspace` 或 `Esc` 关闭预览。
 - `Up` / `Down`: move the row cursor.
 - `Up` / `Down`：移动表格行光标。
 - `Backspace`: go to the current directory's parent.
