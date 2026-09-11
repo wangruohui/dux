@@ -272,6 +272,10 @@ scanned_files=10000 current=/data/project/checkpoints/run-42/model.bin
 scanned_files=20000 current=/data/project/logs/train/events.out
 ```
 
+The same interval controls exact `staging_write` record reports. After scanning, `aggregate`, `checkpoint`, `main_delete`, `main_insert`, and `main_transaction` print start/completion records plus a heartbeat every five seconds while a long SQLite operation is still running. This keeps the main database readable during scanning while making the final staging-to-main merge visible.
+
+同一参数也控制 `staging_write` 临时库精确写入记录数的输出频率。扫描完成后，`aggregate`、`checkpoint`、`main_delete`、`main_insert` 和 `main_transaction` 会输出开始/完成记录数；单次 SQLite 操作超过五秒时还会持续输出心跳。这样扫描期间主库仍可读取，最后从临时库合并到主库的过程也不再静默。
+
 The final line includes throughput:
 
 结束时会输出吞吐：

@@ -411,6 +411,16 @@ def delete_subtree_rows(conn: sqlite3.Connection, root_path: str) -> None:
     )
 
 
+def count_subtree_rows(conn: sqlite3.Connection, root_path: str) -> int:
+    child_lower = f"{root_path}/"
+    child_upper = f"{root_path}0"
+    row = conn.execute(
+        "SELECT count(*) FROM nodes WHERE path = ? OR (path >= ? AND path < ?)",
+        (root_path, child_lower, child_upper),
+    ).fetchone()
+    return int(row[0])
+
+
 def delete_nodes_incremental(
     conn: sqlite3.Connection,
     deleted: list[tuple[str, bool]],

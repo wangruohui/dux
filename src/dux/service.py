@@ -21,6 +21,8 @@ from .scanner import ScanResult, scan_subtree_to_db
 
 
 LIVE_CHILD_LIMIT = 200
+DATABASE_HEARTBEAT_SECONDS = 5.0
+DatabaseProgressCallback = Callable[[str, int | None, int | None, float], None]
 
 
 @dataclass(slots=True)
@@ -304,8 +306,49 @@ class DuxService:
         progress_interval: int = 10000,
         lock_status: Callable[[str], None] | None = None,
         cancel_event: threading.Event | None = None,
+        database_progress: DatabaseProgressCallback | None = None,
     ) -> IndexResult:
         root = self.canonical(path)
+        index_started = time.monotonic()
+
+        def run_database_phase(
+            phase: str,
+            total_records: int | None,
+            operation: Callable[[], None],
+        ) -> None:
+            started = time.monotonic()
+            if database_progress is None:
+                operation()
+                return
+            database_progress(phase, 0, total_records, 0.0)
+            stopped = threading.Event()
+
+            def heartbeat() -> None:
+                while not stopped.wait(DATABASE_HEARTBEAT_SECONDS):
+                    database_progress(
+                        phase,
+                        None,
+                        total_records,
+                        time.monotonic() - started,
+                    )
+
+            reporter = threading.Thread(
+                target=heartbeat,
+                name="dux-database-progress",
+                daemon=True,
+            )
+            reporter.start()
+            try:
+                operation()
+            finally:
+                stopped.set()
+                reporter.join()
+            database_progress(
+                phase,
+                total_records,
+                total_records,
+                time.monotonic() - started,
+            )
 
         def check_cancelled() -> None:
             if cancel_event is not None and cancel_event.is_set():
@@ -321,6 +364,8 @@ class DuxService:
         try:
             staging_conn = db.connect(staging_path)
             try:
+                if database_progress is not None:
+                    database_progress("staging_write", 0, None, 0.0)
                 with staging_conn:
                     scan = scan_subtree_to_db(
                         staging_conn,
@@ -330,13 +375,36 @@ class DuxService:
                         progress_interval=progress_interval,
                         cancel_event=cancel_event,
                         scan_slots=self.scan_slots,
+                        write_progress=(
+                            lambda count: database_progress(
+                                "staging_write",
+                                count,
+                                None,
+                                time.monotonic() - index_started,
+                            )
+                            if database_progress is not None
+                            else None
+                        ),
+                        write_progress_interval=progress_interval,
                     )
                     check_cancelled()
+                    staged_count = db.count_subtree_rows(staging_conn, root)
+                    if database_progress is not None:
+                        database_progress(
+                            "staging_write",
+                            staged_count,
+                            staged_count,
+                            time.monotonic() - index_started,
+                        )
                     staging_conn.set_progress_handler(
                         lambda: int(cancel_event is not None and cancel_event.is_set()), 1000
                     )
                     try:
-                        db.aggregate_subtree(staging_conn, root)
+                        run_database_phase(
+                            "aggregate",
+                            staged_count,
+                            lambda: db.aggregate_subtree(staging_conn, root),
+                        )
                     except sqlite3.OperationalError as exc:
                         if cancel_event is None or not cancel_event.is_set():
                             raise
@@ -347,16 +415,26 @@ class DuxService:
                     new_root = db.fetch_node(staging_conn, root)
                     if new_root is None:
                         raise FileNotFoundError(root)
-                staging_conn.execute("PRAGMA wal_checkpoint(FULL)")
+                run_database_phase(
+                    "checkpoint",
+                    staged_count,
+                    lambda: staging_conn.execute("PRAGMA wal_checkpoint(FULL)").fetchall(),
+                )
             finally:
                 staging_conn.close()
             check_cancelled()
-            self._swap_indexed_subtree(
-                root,
-                staging_path,
-                new_root,
-                lock_status=cancellable_lock_status,
-                check_cancelled=check_cancelled,
+            run_database_phase(
+                "main_transaction",
+                staged_count,
+                lambda: self._swap_indexed_subtree(
+                    root,
+                    staging_path,
+                    new_root,
+                    staged_count=staged_count,
+                    lock_status=cancellable_lock_status,
+                    check_cancelled=check_cancelled,
+                    database_phase=run_database_phase,
+                ),
             )
         finally:
             self._remove_staging_db(staging_path)
@@ -379,8 +457,12 @@ class DuxService:
         root: str,
         staging_path: Path,
         new_root: sqlite3.Row,
+        staged_count: int,
         lock_status: Callable[[str], None] | None = None,
         check_cancelled: Callable[[], None] | None = None,
+        database_phase: Callable[
+            [str, int | None, Callable[[], None]], None
+        ] | None = None,
     ) -> None:
         alias = "staging_index"
         attached = False
@@ -406,8 +488,21 @@ class DuxService:
                 old_files = int(old_root["file_count"]) if old_root else 0
                 old_dirs = int(old_root["dir_count"]) if old_root else 0
                 db.ensure_ancestor_placeholders(self.conn, root)
-                db.delete_subtree_rows(self.conn, root)
-                db.insert_subtree_from_attached(self.conn, alias, root)
+                old_count = db.count_subtree_rows(self.conn, root)
+                if database_phase is None:
+                    db.delete_subtree_rows(self.conn, root)
+                    db.insert_subtree_from_attached(self.conn, alias, root)
+                else:
+                    database_phase(
+                        "main_delete",
+                        old_count,
+                        lambda: db.delete_subtree_rows(self.conn, root),
+                    )
+                    database_phase(
+                        "main_insert",
+                        staged_count,
+                        lambda: db.insert_subtree_from_attached(self.conn, alias, root),
+                    )
                 size_delta = new_size - old_size
                 file_delta = new_files - old_files
                 dir_delta = new_dirs - old_dirs

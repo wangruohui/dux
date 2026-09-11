@@ -292,6 +292,62 @@ class ServiceTests(unittest.TestCase):
 
         self.assertEqual(reports, [2, 4])
 
+    def test_index_reports_staging_and_merge_database_phases(self) -> None:
+        for index in range(5):
+            (self.root / f"file-{index}.bin").write_bytes(b"x")
+        reports: list[tuple[str, int | None, int | None]] = []
+
+        self.service.index_path(
+            str(self.root),
+            progress_interval=2,
+            database_progress=lambda phase, completed, total, _elapsed: reports.append(
+                (phase, completed, total)
+            ),
+        )
+
+        phases = {phase for phase, _completed, _total in reports}
+        self.assertEqual(
+            phases,
+            {
+                "staging_write",
+                "aggregate",
+                "checkpoint",
+                "main_transaction",
+                "main_delete",
+                "main_insert",
+            },
+        )
+        staging_counts = [
+            completed
+            for phase, completed, _total in reports
+            if phase == "staging_write" and completed not in (None, 0)
+        ]
+        self.assertIn(2, staging_counts)
+        self.assertIn(4, staging_counts)
+        self.assertEqual(staging_counts[-1], 6)
+        self.assertIn(("main_insert", 6, 6), reports)
+
+    def test_index_reports_database_heartbeat_during_long_phase(self) -> None:
+        (self.root / "file.bin").write_bytes(b"x")
+        reports: list[tuple[str, int | None]] = []
+        aggregate_subtree = db.aggregate_subtree
+
+        def slow_aggregate(conn: sqlite3.Connection, root: str) -> None:
+            time.sleep(0.03)
+            aggregate_subtree(conn, root)
+
+        with patch("dux.service.DATABASE_HEARTBEAT_SECONDS", 0.005), patch(
+            "dux.service.db.aggregate_subtree", side_effect=slow_aggregate
+        ):
+            self.service.index_path(
+                str(self.root),
+                database_progress=lambda phase, completed, _total, _elapsed: reports.append(
+                    (phase, completed)
+                ),
+            )
+
+        self.assertIn(("aggregate", None), reports)
+
     def test_cancelled_index_does_not_replace_existing_subtree(self) -> None:
         (self.root / "old.bin").write_bytes(b"old")
         self.service.index_path(str(self.root))

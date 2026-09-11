@@ -114,6 +114,20 @@ def main(argv: list[str] | None = None) -> int:
             def report_progress(count: int, path: str) -> None:
                 print(f"scanned_files={count} current={path}", file=sys.stderr, flush=True)
 
+            def report_database_progress(
+                phase: str,
+                completed: int | None,
+                total: int | None,
+                elapsed: float,
+            ) -> None:
+                done = "?" if completed is None else str(completed)
+                records = done if total is None else f"{done}/{total}"
+                print(
+                    f"database_phase={phase} records={records} elapsed={elapsed:.1f}s",
+                    file=sys.stderr,
+                    flush=True,
+                )
+
             result = service.index_path(
                 args.path,
                 progress=report_progress,
@@ -121,6 +135,7 @@ def main(argv: list[str] | None = None) -> int:
                 lock_status=lambda owner: print(
                     f"waiting_for_database_writer {owner}", file=sys.stderr, flush=True
                 ),
+                database_progress=report_database_progress,
             )
             root = result.root
             elapsed = max(result.scan.elapsed_seconds, 0.000001)

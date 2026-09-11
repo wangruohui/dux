@@ -14,6 +14,7 @@ from . import db
 from .model import NodeRecord
 
 ProgressCallback = Callable[[int, str], None]
+WriteProgressCallback = Callable[[int], None]
 
 
 @dataclass(slots=True)
@@ -36,6 +37,8 @@ def scan_subtree_to_db(
     batch_size: int = 5000,
     cancel_event: threading.Event | None = None,
     scan_slots: threading.BoundedSemaphore | None = None,
+    write_progress: WriteProgressCallback | None = None,
+    write_progress_interval: int = 10000,
 ) -> ScanResult:
     started_at = time.monotonic()
     root = _canonical(root_path)
@@ -51,6 +54,22 @@ def scan_subtree_to_db(
     progress_lock = threading.Lock()
     scanned_files = 0
     scanned_dirs = 1
+    written_records = 0
+
+    def record_write_progress(count: int) -> None:
+        nonlocal written_records
+        previous = written_records
+        written_records += count
+        if write_progress is None or write_progress_interval <= 0:
+            return
+        report_at = ((previous // write_progress_interval) + 1) * write_progress_interval
+        while report_at <= written_records:
+            write_progress(report_at)
+            report_at += write_progress_interval
+
+    def flush_records(records: list[NodeRecord]) -> None:
+        db.upsert_node_batch(conn, records)
+        record_write_progress(len(records))
 
     def cancelled() -> bool:
         return cancel_event is not None and cancel_event.is_set()
@@ -66,11 +85,11 @@ def scan_subtree_to_db(
             try:
                 if item is None:
                     if batch:
-                        db.upsert_node_batch(conn, batch)
+                        flush_records(batch)
                     return
                 batch.extend(item)
                 while len(batch) >= batch_size:
-                    db.upsert_node_batch(conn, batch[:batch_size])
+                    flush_records(batch[:batch_size])
                     del batch[:batch_size]
             finally:
                 write_queue.task_done()
