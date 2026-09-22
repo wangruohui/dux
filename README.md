@@ -17,7 +17,7 @@ Path: /data/project                         Sort: size
 │   9.7G   │    14,006 │ 2026-06-22 │ tmp/                         │ [                ] │
 └──────────┴───────────┴────────────┴──────────────────────────────┴────────────────────┘
 
-Enter open/preview  Backspace parent  Alt+Left/Right history  Space select  Del trash  Shift+Del permanent
+Enter open/preview  Backspace parent  Alt+Left/Right history  Space select  Del trash  u undo  Shift+Del permanent
 s size  c count  m date  n name  r refresh  f filter  x cancel filter/refresh/delete  q quit
 ```
 
@@ -182,8 +182,10 @@ dux --workers 16 index /data/project
 - `Alt+Left` / `Alt+Right`：按目录访问历史后退或前进。
 - `Space`: select or unselect the current row; selected rows are highlighted and prefixed with `[x]`. Selections are scoped to the current directory page and are cleared when entering a child or returning to the parent.
 - `Space`：选择或取消选择当前行；选中行会高亮并显示 `[x]`。选择仅限当前目录页面，进入子目录或返回父目录时会清空。
-- `Delete`: move marked rows visible on the current page, or the current row, to trash. Relative paths are preserved and the confirmation lists each `src` and `dst`.
-- `Delete`：把当前页面中可见的已选行（没有选择时为当前光标行）移动到 trash，保留相对路径；确认框会列出每项的 `src` 和 `dst`。
+- `Delete`: move marked rows visible on the current page, or the current row, to trash. Relative paths and indexed size/count move with them, so the trash and its parents show the space used. The confirmation lists each `src` and `dst`.
+- `Delete`：把当前页面中可见的已选行（没有选择时为当前光标行）移动到 trash，保留相对路径，并将索引中的容量/文件数转入 trash 及其父目录；确认框会列出每项的 `src` 和 `dst`。
+- `u`: undo the most recent completed trash move in this UI session, restoring its paths and index. Existing original paths are never overwritten.
+- `u`：撤回本次 UI 会话中最近一次完成的 trash 移动，同时恢复路径和索引；原路径已存在时不会覆盖。
 - `Shift+Delete`: permanently remove the same target set. Files within a directory and multiple delete jobs run concurrently while sharing a global concurrency limit of 256. Press `y` to confirm, `n` or `Esc` to cancel.
 - `Shift+Delete`：永久删除同一目标集合。目录内部文件和多个删除任务会并行处理，并共享全局 256 并发限制。按 `y` 确认，按 `n` 或 `Esc` 取消。
 - `r`: refresh the path under the current cursor in the background. Scanning uses a staging database and the completed subtree is merged in one short transaction.

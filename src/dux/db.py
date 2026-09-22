@@ -421,6 +421,30 @@ def count_subtree_rows(conn: sqlite3.Connection, root_path: str) -> int:
     return int(row[0])
 
 
+def move_subtree_rows(conn: sqlite3.Connection, source: str, destination: str) -> None:
+    source_lower, source_upper = f"{source}/", f"{source}0"
+    destination_parent = str(Path(destination).parent)
+    conn.execute(
+        """
+        INSERT INTO nodes(path, parent_path, name, is_dir, indexed, depth,
+                          size_bytes, file_count, dir_count, updated_at)
+        SELECT ? || substr(path, ?),
+               CASE WHEN path = ? THEN ? ELSE ? || substr(parent_path, ?) END,
+               CASE WHEN path = ? THEN ? ELSE name END,
+               is_dir, indexed, depth + ?, size_bytes, file_count, dir_count, updated_at
+        FROM nodes
+        WHERE path = ? OR (path >= ? AND path < ?)
+        """,
+        (
+            destination, len(source) + 1, source, destination_parent,
+            destination, len(source) + 1, source, Path(destination).name,
+            len(Path(destination).parts) - len(Path(source).parts),
+            source, source_lower, source_upper,
+        ),
+    )
+    delete_subtree_rows(conn, source)
+
+
 def delete_nodes_incremental(
     conn: sqlite3.Connection,
     deleted: list[tuple[str, bool]],

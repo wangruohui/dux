@@ -80,6 +80,9 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
             elif event.key == "shift+delete":
                 event.stop()
                 self.app.action_permanent_delete_requested()
+            elif event.key == "u":
+                event.stop()
+                self.app.action_undo_trash()
 
     class ConfirmScreen(ModalScreen[bool]):
         def __init__(self, message: str) -> None:
@@ -426,6 +429,7 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
             Binding("x", "cancel_delete", "Cancel Active"),
             Binding("space", "toggle_select", "Select"),
             Binding("delete", "trash_requested", "Trash"),
+            Binding("u", "undo_trash", "Undo Trash"),
             Binding("shift+delete", "permanent_delete_requested", "Delete"),
             Binding("s", "sort_size", "Sort Size"),
             Binding("c", "sort_count", "Sort Count"),
@@ -450,6 +454,8 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
             self.deleting_paths: set[str] = set()
             self.next_delete_job_id = 1
             self.delete_jobs_lock = threading.Lock()
+            self.trash_history: list[list[tuple[str, str]]] = []
+            self.undo_active = False
             self.filter_active = False
             self.filter_cancel_event: threading.Event | None = None
             self.refresh_slots = threading.BoundedSemaphore(self.service.max_workers)
@@ -477,6 +483,9 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
         def action_request_quit(self) -> None:
             if self.delete_active:
                 self.notify("Delete is still running; wait for it to finish before quitting.", severity="warning")
+                return
+            if self.undo_active:
+                self.notify("Trash undo is still running; wait before quitting.", severity="warning")
                 return
             if self.filter_active:
                 self.notify("Filter is still running; wait for it to finish before quitting.", severity="warning")
@@ -1113,6 +1122,9 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
             trash: bool,
             trash_destinations: dict[str, str] | None = None,
         ) -> None:
+            if self.undo_active:
+                self.notify("Wait for the trash undo to finish.", severity="warning")
+                return
             with self.delete_jobs_lock:
                 conflicts = [
                     target
@@ -1303,6 +1315,8 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
                         self.call_from_thread(
                             self._show_delete_job_status, job_id, f"Index synchronized: {target}"
                         )
+                    elif phase == "moved-to-trash":
+                        completed.append(target)
 
                 filesystem_first = permanent and self.service.immutable_fallback
                 if not filesystem_first:
@@ -1358,7 +1372,8 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
                 )
                 completed = targets
                 self.call_from_thread(
-                    self._finish_delete, job_id, targets, completed, None, False, True
+                    self._finish_delete, job_id, targets, completed, None, False, True,
+                    trash_destinations if trash else None,
                 )
             except DeleteCancelled as exc:
                 self.call_from_thread(
@@ -1369,10 +1384,12 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
                     None,
                     True,
                     True,
+                    trash_destinations if trash else None,
                 )
             except Exception as exc:
                 self.call_from_thread(
-                    self._finish_delete, job_id, targets, completed, exc, False, True
+                    self._finish_delete, job_id, targets, completed, exc, False, True,
+                    trash_destinations if trash else None,
                 )
             finally:
                 if delete_service is not None:
@@ -1392,6 +1409,7 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
             error: Exception | None,
             cancelled: bool,
             index_synchronized: bool,
+            trash_destinations: dict[str, str] | None = None,
         ) -> None:
             with self.delete_jobs_lock:
                 self.delete_jobs.pop(job_id, None)
@@ -1400,6 +1418,10 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
                 remaining_jobs = len(self.delete_jobs)
             for target in completed:
                 self.marked_paths.discard(target)
+            if trash_destinations and completed:
+                self.trash_history.append(
+                    [(target, trash_destinations[target]) for target in completed]
+                )
             self.marked_paths = {
                 path
                 for path in self.marked_paths
@@ -1429,6 +1451,52 @@ def run_ui(db_path: str | None, path: str, workers: int) -> None:
                 self._render_delete_status()
             else:
                 self._set_status(outcome)
+            self._reload_table()
+
+        def action_undo_trash(self) -> None:
+            if self.undo_active or self.delete_active:
+                self.notify("Wait for active file operations to finish.", severity="warning")
+                return
+            if not self.trash_history:
+                self.notify("No trash move to undo.")
+                return
+            moves = list(self.trash_history[-1])
+            self.undo_active = True
+            self._set_status(f"Restoring {len(moves)} item(s) from trash...")
+
+            def worker() -> None:
+                restored: list[tuple[str, str]] = []
+                error: Exception | None = None
+                service: DuxService | None = None
+                try:
+                    service = DuxService(db_path=self.service.db_path)
+                    for source, destination in reversed(moves):
+                        service.restore_from_trash(source, destination)
+                        restored.append((source, destination))
+                except Exception as exc:
+                    error = exc
+                finally:
+                    if service is not None:
+                        service.close()
+                self.call_from_thread(self._finish_undo_trash, restored, error)
+
+            self.run_worker(worker, thread=True, exclusive=False)
+
+        def _finish_undo_trash(
+            self, restored: list[tuple[str, str]], error: Exception | None
+        ) -> None:
+            if restored:
+                remaining = [move for move in self.trash_history[-1] if move not in restored]
+                if remaining:
+                    self.trash_history[-1] = remaining
+                else:
+                    self.trash_history.pop()
+                self._reopen_read_service_after_write()
+            self.undo_active = False
+            if error is not None:
+                self.notify(f"Trash undo stopped: {error}", severity="error")
+            else:
+                self.notify(f"Restored {len(restored)} item(s) from trash.")
             self._reload_table()
 
     DuxApp().run(mouse=False)

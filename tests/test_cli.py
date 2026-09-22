@@ -252,6 +252,7 @@ class CliTests(unittest.TestCase):
 
                 bindings = {(binding.key, binding.action) for binding in app.BINDINGS}
                 self.assertIn(("delete", "trash_requested"), bindings)
+                self.assertIn(("u", "undo_trash"), bindings)
                 self.assertIn(
                     ("shift+delete", "permanent_delete_requested"), bindings
                 )
@@ -283,6 +284,44 @@ class CliTests(unittest.TestCase):
                 self.assertEqual(started.pop(), (["/mnt/afs/A/B/C/D"], expected))
                 app.service.close()
             finally:
+                service.close()
+
+    def test_ui_undo_restores_last_trash_move(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "root"
+            root.mkdir()
+            source = root / "item.bin"
+            source.write_bytes(b"data")
+            destination = root / "trash" / "item.bin"
+            db_path = Path(directory) / "dux.db"
+            service = DuxService(db_path=db_path, max_workers=1)
+            service.index_path(str(root))
+            apps = []
+            try:
+                with patch("textual.app.App.run", lambda app, *args, **kwargs: apps.append(app)):
+                    run_ui(str(db_path), str(root), 1)
+                app = apps[0]
+                service.delete_paths(
+                    [str(source)], trash=True,
+                    trash_destinations={str(source): str(destination)},
+                )
+                app._reload_table = lambda *args, **kwargs: None
+                app._reopen_read_service_after_write = lambda: None
+                app._set_status = lambda *_args: None
+                app.notify = lambda *_args, **_kwargs: None
+                app.call_from_thread = lambda callback, *args: callback(*args)
+                app.run_worker = lambda callback, **_kwargs: callback()
+                app.trash_history.append([(str(source), str(destination))])
+
+                app.action_undo_trash()
+
+                self.assertEqual(source.read_bytes(), b"data")
+                self.assertFalse(destination.exists())
+                self.assertEqual(app.trash_history, [])
+                self.assertFalse(app.undo_active)
+                self.assertEqual(int(service.get_node(str(root))["size_bytes"]), 4)
+            finally:
+                app.service.close()
                 service.close()
 
     def test_ui_keyboard_item_parent_and_history_navigation(self) -> None:

@@ -404,9 +404,39 @@ class ServiceTests(unittest.TestCase):
         self.assertFalse(source.exists())
         self.assertTrue((destination / "item.bin").exists())
         self.assertIsNone(self.service.get_node(str(source)))
+        self.assertEqual(int(self.service.get_node(str(home / "B"))["file_count"]), 0)
+        for path in (destination, destination.parent, home / "trash", home):
+            row = self.service.get_node(str(path))
+            self.assertEqual(int(row["file_count"]), 1)
+            self.assertEqual(int(row["size_bytes"]), 4)
+        self.assertIsNotNone(self.service.get_node(str(destination / "item.bin")))
         home_row = self.service.get_node(str(home))
-        self.assertEqual(int(home_row["file_count"]), 0)
-        self.assertEqual(int(home_row["size_bytes"]), 0)
+        self.assertEqual(int(home_row["file_count"]), 1)
+        self.assertEqual(int(home_row["size_bytes"]), 4)
+
+        self.service.restore_from_trash(str(source), str(destination))
+        self.assertTrue((source / "item.bin").exists())
+        self.assertFalse(destination.exists())
+        self.assertIsNone(self.service.get_node(str(destination)))
+        self.assertIsNotNone(self.service.get_node(str(source / "item.bin")))
+        self.assertEqual(int(self.service.get_node(str(home / "trash"))["size_bytes"]), 0)
+        self.assertEqual(int(self.service.get_node(str(home))["size_bytes"]), 4)
+
+    def test_undo_trash_refuses_to_overwrite_recreated_source(self) -> None:
+        source = self.root / "file.bin"
+        source.write_bytes(b"original")
+        self.service.index_path(str(self.root))
+        destination = self.root / "trash" / "file.bin"
+        self.service.delete_paths(
+            [str(source)], trash=True,
+            trash_destinations={str(source): str(destination)},
+        )
+        source.write_bytes(b"replacement")
+
+        with self.assertRaises(FileExistsError):
+            self.service.restore_from_trash(str(source), str(destination))
+        self.assertEqual(source.read_bytes(), b"replacement")
+        self.assertEqual(destination.read_bytes(), b"original")
 
     def test_prefix_paths_do_not_confuse_refresh(self) -> None:
         a = self.root / "flow_grpo_neo"

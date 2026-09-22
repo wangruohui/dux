@@ -659,7 +659,7 @@ class DuxService:
             )
             return "", completed
 
-        destinations: list[str] = []
+        destinations_by_source: dict[str, str] = {}
         completed_targets: list[str] = []
         was_cancelled = False
         delete_errors: list[BaseException] = []
@@ -677,9 +677,11 @@ class DuxService:
                     operation_cancel.set()
                     delete_errors.append(exc)
                     continue
-                destinations.append(destination)
+                destinations_by_source[target] = destination
                 if completed:
                     completed_targets.append(target)
+                    if trash and status is not None:
+                        status(target, "moved-to-trash")
                 else:
                     was_cancelled = True
 
@@ -698,7 +700,12 @@ class DuxService:
             raise writer_errors[0]
 
         for target in completed_targets:
-            self._delete_subtree_from_index(target, lock_status=report_lock_wait)
+            if trash:
+                self._move_subtree_in_index(
+                    target, destinations_by_source[target], lock_status=report_lock_wait
+                )
+            else:
+                self._delete_subtree_from_index(target, lock_status=report_lock_wait)
             if status is not None:
                 status(target, "index-synced")
 
@@ -706,7 +713,7 @@ class DuxService:
             raise delete_errors[0]
         if was_cancelled:
             raise DeleteCancelled(completed_targets)
-        return destinations
+        return [destinations_by_source[target] for target, _indexed in targets]
 
     def delete_paths_filesystem_first(
         self,
@@ -943,6 +950,32 @@ class DuxService:
         ):
             db.delete_subtree_rows(self.conn, root)
             db.refresh_ancestor_aggregates(self.conn, root)
+
+    def _move_subtree_in_index(
+        self,
+        source: str,
+        destination: str,
+        lock_status: Callable[[str], None] | None = None,
+    ) -> None:
+        with db.writer_transaction(
+            self.conn, "move-subtree", source, on_wait=lock_status
+        ):
+            db.ensure_ancestor_placeholders(self.conn, destination)
+            db.delete_subtree_rows(self.conn, destination)
+            db.move_subtree_rows(self.conn, source, destination)
+            db.refresh_ancestor_aggregates(self.conn, source)
+            db.refresh_ancestor_aggregates(self.conn, destination)
+
+    def restore_from_trash(self, source: str, destination: str) -> None:
+        source = os.path.abspath(os.path.expanduser(source))
+        destination = os.path.abspath(os.path.expanduser(destination))
+        if os.path.lexists(source):
+            raise FileExistsError(f"original path now exists: {source}")
+        if not os.path.lexists(destination):
+            raise FileNotFoundError(destination)
+        Path(source).parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(destination, source)
+        self._move_subtree_in_index(destination, source)
 
     def trash_destination(self, path: str) -> str:
         source = Path(self.canonical(path))
