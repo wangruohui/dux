@@ -19,6 +19,10 @@ def _human_bytes(size: int) -> str:
 def _sort_entries(
     entries: tuple[S3Entry, ...], sort_by: str, reverse: bool
 ) -> tuple[S3Entry, ...]:
+    if sort_by == "name":
+        return tuple(
+            sorted(entries, key=lambda entry: entry.name.casefold(), reverse=reverse)
+        )
     attributes = {
         "size": "size_bytes",
         "count": "object_count",
@@ -93,6 +97,7 @@ def run_s3_ui(
                 "s": self.app.action_sort_size,
                 "c": self.app.action_sort_count,
                 "m": self.app.action_sort_mtime,
+                "n": self.app.action_sort_name,
                 "q": self.app.action_request_quit,
                 "ctrl+c": self.app.action_request_quit,
             }
@@ -144,6 +149,7 @@ def run_s3_ui(
             Binding("s", "sort_size", "Sort Size"),
             Binding("c", "sort_count", "Sort Count"),
             Binding("m", "sort_mtime", "Sort Date"),
+            Binding("n", "sort_name", "Sort Name"),
         ]
 
         def __init__(self) -> None:
@@ -254,13 +260,17 @@ def run_s3_ui(
             if focus_row is not None:
                 table.move_cursor(row=focus_row, column=0, animate=False)
             source = "cache" if cached else "remote"
-            sort_name = {"size": "size", "count": "objects", "mtime": "date"}[
-                self.sort_by
-            ]
+            sort_name = {
+                "size": "size",
+                "count": "objects",
+                "mtime": "date",
+                "name": "name",
+            }[self.sort_by]
             direction = "desc" if self.reverse else "asc"
+            missing_note = " | unindexed last" if self.sort_by != "name" else ""
             self._set_status(
                 f"{len(self.entries)} item(s) from {source} | "
-                f"sort={sort_name} {direction} | unindexed last"
+                f"sort={sort_name} {direction}{missing_note}"
             )
 
         def _selected_entry(self) -> S3Entry | None:
@@ -343,6 +353,9 @@ def run_s3_ui(
 
         def action_sort_mtime(self) -> None:
             self._apply_sort("mtime")
+
+        def action_sort_name(self) -> None:
+            self._apply_sort("name")
 
         def _apply_sort(self, sort_by: str) -> None:
             if self.last_sort_key == sort_by:

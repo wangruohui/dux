@@ -78,6 +78,14 @@ class S3BrowserTests(unittest.TestCase):
             [entry.name for entry in _sort_entries(entries, "mtime", False)],
             ["small", "mid", "large", "missing"],
         )
+        self.assertEqual(
+            [entry.name for entry in _sort_entries(entries, "name", True)],
+            ["small", "missing", "mid", "large"],
+        )
+        self.assertEqual(
+            [entry.name for entry in _sort_entries(entries, "name", False)],
+            ["large", "mid", "missing", "small"],
+        )
 
     def test_uri_navigation(self) -> None:
         self.assertEqual(canonical_s3_uri("s3://bucket/a/b/"), "s3://bucket/a/b")
@@ -424,6 +432,7 @@ class S3BrowserTests(unittest.TestCase):
         self.assertIs(run_options["mouse"], False)
         bindings = {(binding.key, binding.action) for binding in app.BINDINGS}
         self.assertIn(("shift+x", "cancel_delete"), bindings)
+        self.assertIn(("n", "sort_name"), bindings)
 
         async def exercise() -> None:
             async with app.run_test(size=(100, 30)) as pilot:
@@ -444,6 +453,11 @@ class S3BrowserTests(unittest.TestCase):
                 self.assertEqual(app.sort_by, "count")
                 self.assertTrue(app.reverse)
                 await pilot.press("c")
+                self.assertFalse(app.reverse)
+                await pilot.press("n")
+                self.assertEqual(app.sort_by, "name")
+                self.assertTrue(app.reverse)
+                await pilot.press("n")
                 self.assertFalse(app.reverse)
 
                 table.move_cursor(row=1, column=0, animate=False)
