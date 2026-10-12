@@ -4,6 +4,10 @@ Fast disk usage indexing, terminal visualization, and cleanup management.
 
 快速磁盘占用索引、终端可视化浏览和空间清理管理工具。
 
+Python 3.10+ · SQLite · Pure terminal UI · Local filesystems and S3
+
+支持 Python 3.10+ · SQLite 存储 · 纯终端 UI · 本地文件系统与 S3
+
 ```text
 dux ui /data/project
 
@@ -31,18 +35,22 @@ s size  c count  m date  n name  r refresh  f filter  x cancel filter/refresh/de
 
 ## Latest Features / 最新功能
 
-- **Refresh what you are looking at**: press `r` to rescan items under the cursor in parallel while the UI stays responsive. Refreshes share the configured scan concurrency; completed subtrees are merged through short serialized SQLite transactions.
-- **刷新光标所在内容**：按 `r` 可并行重新统计多个光标项目，UI 保持可操作。refresh 任务共享配置的扫描并发，完成后的子树通过串行短 SQLite 事务合并。
+- **Scan without blocking exploration**: indexing writes to a staging database while the UI keeps reading the last committed snapshot. Scan, aggregation, checkpoint, and final merge progress are all reported, so a large index never appears to hang silently at the end.
+- **边扫描边浏览**：索引先写入 staging 数据库，UI 继续读取上一个已提交快照；扫描、聚合、checkpoint 和最终合并均持续输出进度，大型索引不会在末尾无提示地“卡住”。
+- **Refresh exactly what changed**: press `r` to rescan the item under the cursor. Multiple refreshes may run concurrently, share bounded scan capacity, and merge completed subtrees through short serialized SQLite transactions.
+- **只刷新发生变化的内容**：按 `r` 后台重新统计光标项目；多个 refresh 可并行运行、共享受控扫描并发，完成的子树通过短 SQLite 事务依次合并。
 - **Live-first recursive filter**: press `f` to search the current tree with shell globs and optional exclude pruning. Live filesystem results are combined with indexed size, file count, and date metadata without walking stale database paths.
 - **实时优先递归筛选**：按 `f` 使用 shell 通配符检索当前子树，并可通过 exclude 剪枝；实时文件系统结果会与索引中的大小、文件数和日期合并，同时避免遍历 stale 数据库路径。
-- **Index-consistent deletion**: completed deletes remove the entire indexed path prefix and recompute every ancestor aggregate, even if the deleted root row was already missing.
-- **删除后索引一致**：删除完成后会清理目标路径前缀下的整棵索引并重算所有父级，即使目标根记录已经缺失，也不会遗留孤立条目。
-- **Reversible sorting everywhere**: browsing and filter-result tables support size, recursive file count, date, and name; press the active metric again to reverse the order, with unindexed entries always last.
-- **所有列表均可双向排序**：浏览页和筛选结果页支持大小、递归文件数、日期、名称排序；再次按当前排序键即可反转顺序，未统计项始终置后。
+- **Recoverable cleanup with indexed trash**: `Delete` moves paths to storage-local trash and moves their indexed size/count with them; `u` restores the latest completed move. `Shift+Delete` is reserved for permanent removal.
+- **索引一致的可恢复清理**：`Delete` 把路径移入同存储 trash，并同步迁移索引中的容量与文件数；按 `u` 可撤回最近一次已完成移动，只有 `Shift+Delete` 才会永久删除。
+- **Index-consistent permanent deletion**: successful removals are flushed to SQLite continuously; completed roots are range-deleted from the index and every affected ancestor is recomputed, avoiding stale descendants and totals.
+- **永久删除后索引一致**：成功删除的条目会持续写回 SQLite；目标完成后按路径范围清理索引并重算受影响父级，避免残留子项或错误总量。
+- **Reversible multi-metric sorting**: local and S3 browsers sort by size, recursive count, date, or name; filter results sort by size, count, or date. Press the active key again to reverse the direction.
+- **多指标双向排序**：本地与 S3 浏览页支持大小、递归数量、日期和名称排序；filter 结果页支持大小、数量和日期排序，再按一次当前排序键即可反转方向。
 - **Responsive, cancellable background work**: press `x` to cancel an active filter, refresh, or the latest delete job. Multiple delete jobs and per-tree workers share bounded concurrency and continuously flush successful removals to SQLite.
 - **响应式、可取消后台任务**：按 `x` 可取消正在运行的筛选、刷新或最近一次删除任务。多个删除任务与目录内部 worker 共享受控并发，成功删除会持续同步 SQLite。
-- **Instant S3 viewer**: open `s3://bucket/prefix` without building an index. Browse paginated prefixes with a bounded TTL cache, see object size/date and cached directory aggregates, select rows, and permanently delete objects or prefixes in the background.
-- **即时 S3 浏览**：无需建立索引即可打开 `s3://bucket/prefix`。分页浏览并使用有界 TTL 缓存，显示对象大小、日期和缓存目录聚合，支持选择并在后台永久删除对象或 prefix。
+- **S3 viewer plus exact prefix statistics**: open `s3://bucket/prefix` immediately with paginated TTL-cached listing, or run `dux index s3://bucket` for persistent exact prefix size/count. Prefix shards scan concurrently; background batch deletion remains cancellable and updates cached and persistent totals.
+- **S3 即时浏览与精确 prefix 统计**：可直接打开 `s3://bucket/prefix` 进行带 TTL 缓存的分页浏览，也可执行 `dux index s3://bucket` 持久化精确 prefix 大小和数量；prefix shard 并发扫描，后台批量删除可取消，并同步更新缓存与持久统计。
 
 ## Highlights / 亮点
 
@@ -80,6 +88,7 @@ Install from a checkout:
 从源码目录安装：
 
 ```bash
+python3 --version  # Python 3.10 or newer
 python3 -m venv .venv
 . .venv/bin/activate
 pip install -e .
@@ -211,9 +220,9 @@ The graph column follows the active metric: size mode uses bytes, count mode use
 
 右侧比例条跟随当前排序指标：大小模式按 bytes，文件数模式按递归文件数。
 
-Press `s`, `c`, or `m` once to sort that field descending; press the same key again to reverse it to ascending. Switching fields starts from descending again. Unindexed entries are always listed after indexed entries.
+Press `s`, `c`, `m`, or `n` once to sort by size, count, date, or name descending; press the same key again to reverse it to ascending. Switching fields starts from descending again. Unindexed entries are always listed after indexed entries.
 
-第一次按 `s`、`c` 或 `m` 会按对应字段降序排列，连续第二次按相同键切换为升序；切换字段后重新从降序开始。未统计项始终排在已统计项之后。
+第一次按 `s`、`c`、`m` 或 `n` 会按大小、数量、日期或名称降序排列，连续第二次按相同键切换为升序；切换字段后重新从降序开始。未统计项始终排在已统计项之后。
 
 During deletion, the status line reports the active phase. File removal shows a progress bar, processed entry count, throughput, ETA, and current path. Successfully removed entries are continuously sent to a batched SQLite writer. A completed target is then removed unconditionally by path prefix and every ancestor aggregate is recomputed, including when the target root row was already missing. Cancelling does not rescan the target.
 
@@ -302,6 +311,10 @@ Minimal system packages:
 
 最小系统依赖：
 
+`dux` requires Python 3.10 or newer. Check the interpreter version before creating the virtual environment.
+
+`dux` 需要 Python 3.10 或更新版本；创建虚拟环境前请先确认解释器版本。
+
 ```bash
 sudo apt-get install -y python3 python3-venv python3-pip sqlite3
 ```
@@ -352,9 +365,9 @@ This model makes common operations straightforward: list children, sort by size/
 
 这个模型让常用操作更直接：列出子项、按大小/文件数/日期/名称排序、刷新单个子树、更新父路径聚合值、在部分索引祖先间导航，并在删除后保持数据库一致。
 
-Subtree delete uses the path primary key as a range index: `path = root OR root/ <= path < root0`. The service reads the root aggregate once, deletes the subtree rows in SQLite, then applies one delta to ancestors instead of recomputing every parent from scratch.
+Completed permanent deletion uses the path primary key as a range index: `path = root OR root/ <= path < root0`. Incremental batches keep the UI totals moving during deletion; after a root completes, dux removes any remaining subtree rows and recomputes affected ancestors from their surviving children. Moving to trash rewrites the indexed subtree from source prefix to destination prefix in one transaction and refreshes both ancestor chains, which also makes `u` restoration index-consistent.
 
-子树删除会利用 path 主键做范围删除：`path = root OR root/ <= path < root0`。服务只读取一次根节点聚合值，在 SQLite 中删除整棵子树后，再把一个 delta 应用到祖先路径，而不是逐层重新统计。
+永久删除完成后会利用 path 主键做范围清理：`path = root OR root/ <= path < root0`。删除期间以增量批次持续更新 UI 统计；目标完成后清除所有剩余子树记录，并根据仍存在的子项重新计算受影响父级。移入 trash 时会在单个事务中把索引子树从源 prefix 改写到目标 prefix，并刷新两侧祖先链，因此按 `u` 恢复后索引仍保持一致。
 
 ## Development / 开发
 

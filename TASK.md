@@ -6,11 +6,12 @@
 
 锁定对象：`/mnt/afs/wangruohui/tools/dux`；不访问或修改实际用户数据及 S3 数据。
 
-阶段：DOING，先完成版本约束并独立推送，再更新 README。
+阶段：DONE，Python 版本修正和 README 更新均已完成。
 
 - DONE：将最低 Python 版本调整为 3.10；全部源码和测试已通过 Python 3.10 语法编译。
-- DOING：提交并推送 Python 版本修正。
-- TODO：根据近期提交整理 README，验证后独立提交并推送。
+- DONE：Python 版本修正已作为 `88c111f` 推送到 `origin/main`。
+- DONE：README 已集中呈现 staging 写库进度、trash 撤回、后台取消、S3 精确索引与四字段排序。
+- DONE：修正文档中的 filter 排序能力和删除索引模型描述，并完成格式与隐私检查。
 
 ## 已完成的 S3 按名称排序
 
