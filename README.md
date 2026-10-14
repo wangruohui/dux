@@ -51,6 +51,8 @@ s size  c count  m date  n name  r refresh  f filter  x cancel filter/refresh/de
 - **响应式、可取消后台任务**：按 `x` 可取消正在运行的筛选、刷新或最近一次删除任务。多个删除任务与目录内部 worker 共享受控并发，成功删除会持续同步 SQLite。
 - **S3 viewer plus exact prefix statistics**: open `s3://bucket/prefix` immediately with paginated TTL-cached listing, or run `dux index s3://bucket` for persistent exact prefix size/count. Prefix shards scan concurrently; background batch deletion remains cancellable and updates cached and persistent totals.
 - **S3 即时浏览与精确 prefix 统计**：可直接打开 `s3://bucket/prefix` 进行带 TTL 缓存的分页浏览，也可执行 `dux index s3://bucket` 持久化精确 prefix 大小和数量；prefix shard 并发扫描，后台批量删除可取消，并同步更新缓存与持久统计。
+- **Window-aware S3 image preview**: with the optional image extra, press `Enter` on an image object to render it directly in a terminal-sized modal using the best available graphics protocol.
+- **适配窗口的 S3 图片预览**：安装可选图片组件后，在图片对象上按 `Enter`，即可通过当前终端支持的最佳图像协议在自适应 modal 中显示。
 
 ## Highlights / 亮点
 
@@ -117,6 +119,18 @@ Browse S3 without indexing (requires a compatible `aoss_client` installation and
 ```bash
 dux ui s3://example-bucket/project
 ```
+
+Install the optional image renderer on Python 3.12 or newer to preview S3 images directly inside the TUI. Core dux remains installable on Python 3.10:
+
+在 Python 3.12 或更新版本中安装可选图片渲染组件后，可以直接在 S3 TUI 中预览图片；dux 核心功能仍支持 Python 3.10：
+
+```bash
+pip install -e '.[images]'
+```
+
+Select a supported image object and press `Enter`. The object is loaded in the background, cached in memory, and rendered in a modal that follows the current terminal dimensions while preserving the image aspect ratio. `Backspace`, `Left`, or `Esc` returns to the listing. Objects larger than 64 MiB are rejected before download when their listed size is known.
+
+选中支持的图片对象后按 `Enter`，对象会在后台加载并缓存在内存中，再按当前终端尺寸等比例显示于 modal；按 `Backspace`、`Left` 或 `Esc` 返回列表。若 listing 中已知对象超过 64 MiB，会在下载前拒绝预览。
 
 Build exact recursive prefix statistics with one streaming object-list pass:
 

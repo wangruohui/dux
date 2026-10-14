@@ -1,12 +1,19 @@
-# 当前任务：Python 3.10 支持与 README 更新
+# 当前任务：S3 图片预览
 
-当前目标：允许在 Python 3.10 安装 dux，并根据近期功能更新重新整理 README。
+当前目标：S3 UI 中对图片对象按 `Enter` 后，在终端内按当前窗口大小等比例预览。
 
-交付物：Python 版本约束修正及 3.10 验证、最新功能的双语 README。
+交付物：AOSS 对象读取、后台加载与缓存、自适应图片 modal、测试和双语 README。
 
-锁定对象：`/mnt/afs/wangruohui/tools/dux`；不访问或修改实际用户数据及 S3 数据。
+锁定对象：`/mnt/afs/wangruohui/tools/dux`；测试使用内存图片和 fake client，不读取或修改真实 S3 对象。
 
-阶段：DONE，Python 版本修正和 README 更新均已完成。
+阶段：DONE，图片读取、自适应预览、部署和测试均已完成。
+
+- DONE：AOSS `Client.get` 接入后台对象读取，增加 64 MiB 限制和 8 项/128 MiB LRU 缓存。
+- DONE：图片 modal 使用当前可用终端区域等比例布局，支持 `Backspace`、`Left`、`Esc` 返回。
+- DONE：图片能力作为 Python 3.12+ 可选 extra；当前 Python 3.14.2 `.venv` 已安装部署。
+- DONE：4000×2000 图片在 80×24 headless 窗口中完成适配验证；S3 专项 22 项、完整 66 项测试通过。
+
+## 已完成的 Python 3.10 支持与 README 更新
 
 - DONE：将最低 Python 版本调整为 3.10；全部源码和测试已通过 Python 3.10 语法编译。
 - DONE：Python 版本修正已作为 `88c111f` 推送到 `origin/main`。

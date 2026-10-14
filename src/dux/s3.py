@@ -12,6 +12,8 @@ from typing import Callable, Iterable, Protocol
 class S3Client(Protocol):
     def list(self, uri: str) -> Iterable[str]: ...
 
+    def get(self, uri: str) -> bytes: ...
+
     def delete(self, uri: str) -> object: ...
 
 
@@ -61,6 +63,18 @@ class S3BatchDeleteError(RuntimeError):
 
 
 S3_DELETE_BATCH_SIZE = 500
+S3_PREVIEW_MAX_BYTES = 64 * 1024 * 1024
+S3_PREVIEW_CACHE_BYTES = 128 * 1024 * 1024
+S3_PREVIEW_CACHE_ITEMS = 8
+
+
+def _human_byte_count(size: int) -> str:
+    value = float(size)
+    for unit in ("B", "KiB", "MiB", "GiB"):
+        if value < 1024.0 or unit == "GiB":
+            return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} B"
+        value /= 1024.0
+    return f"{size} B"
 
 
 def canonical_s3_uri(uri: str) -> str:
@@ -102,6 +116,12 @@ class AossClientAdapter:
 
     def list(self, uri: str) -> Iterable[str]:
         return self._client.list(uri)
+
+    def get(self, uri: str) -> bytes:
+        payload = self._client.get(canonical_s3_uri(uri))
+        if not isinstance(payload, bytes):
+            raise TypeError(f"AOSS get returned {type(payload).__name__}, expected bytes")
+        return payload
 
     def list_with_info(
         self, uri: str
@@ -252,6 +272,11 @@ class S3Browser:
         self.stats_store = stats_store
         self._cache: OrderedDict[str, tuple[float, tuple[S3Entry, ...]]] = OrderedDict()
         self._cache_lock = threading.Lock()
+        self._preview_cache: OrderedDict[
+            tuple[str, int | None, float | None], bytes
+        ] = OrderedDict()
+        self._preview_cache_bytes = 0
+        self._preview_cache_lock = threading.Lock()
 
     def _get_client(self) -> S3Client:
         if self._client is not None:
@@ -329,6 +354,54 @@ class S3Browser:
         if iterator is None:
             raise RuntimeError("the configured S3 client does not support recursive listing")
         yield from iterator(canonical_s3_uri(uri))
+
+    def read_object(
+        self,
+        entry: S3Entry,
+        *,
+        max_bytes: int = S3_PREVIEW_MAX_BYTES,
+    ) -> bytes:
+        if entry.is_dir:
+            raise IsADirectoryError(entry.uri)
+        if entry.size_bytes is not None and entry.size_bytes > max_bytes:
+            raise ValueError(
+                f"object is {_human_byte_count(entry.size_bytes)}; "
+                f"preview limit is {_human_byte_count(max_bytes)}"
+            )
+        cache_key = (canonical_s3_uri(entry.uri), entry.size_bytes, entry.mtime)
+        with self._preview_cache_lock:
+            cached = self._preview_cache.get(cache_key)
+            if cached is not None:
+                self._preview_cache.move_to_end(cache_key)
+                return cached
+
+        client = self._get_client()
+        getter = getattr(client, "get", None)
+        if getter is None:
+            raise RuntimeError("the configured S3 client does not support object reads")
+        payload = getter(cache_key[0])
+        if not isinstance(payload, bytes):
+            raise TypeError(f"S3 get returned {type(payload).__name__}, expected bytes")
+        if len(payload) > max_bytes:
+            raise ValueError(
+                f"object is {_human_byte_count(len(payload))}; "
+                f"preview limit is {_human_byte_count(max_bytes)}"
+            )
+
+        with self._preview_cache_lock:
+            previous = self._preview_cache.get(cache_key)
+            if previous is not None:
+                self._preview_cache_bytes -= len(previous)
+            self._preview_cache[cache_key] = payload
+            self._preview_cache.move_to_end(cache_key)
+            self._preview_cache_bytes += len(payload)
+            while (
+                len(self._preview_cache) > S3_PREVIEW_CACHE_ITEMS
+                or self._preview_cache_bytes > S3_PREVIEW_CACHE_BYTES
+            ):
+                _, removed = self._preview_cache.popitem(last=False)
+                self._preview_cache_bytes -= len(removed)
+        return payload
 
     def _with_stats(self, entries: tuple[S3Entry, ...]) -> tuple[S3Entry, ...]:
         enriched = self._with_cached_aggregates(entries)
@@ -425,17 +498,30 @@ class S3Browser:
         with self._cache_lock:
             if uri is None:
                 self._cache.clear()
-                return
-            target = canonical_s3_uri(uri)
-            overlapping = [
-                cached_uri
-                for cached_uri in self._cache
-                if cached_uri == target
-                or cached_uri.startswith(target + "/")
-                or target.startswith(cached_uri + "/")
-            ]
-            for cached_uri in overlapping:
-                self._cache.pop(cached_uri, None)
+            else:
+                target = canonical_s3_uri(uri)
+                overlapping = [
+                    cached_uri
+                    for cached_uri in self._cache
+                    if cached_uri == target
+                    or cached_uri.startswith(target + "/")
+                    or target.startswith(cached_uri + "/")
+                ]
+                for cached_uri in overlapping:
+                    self._cache.pop(cached_uri, None)
+        with self._preview_cache_lock:
+            if uri is None:
+                self._preview_cache.clear()
+                self._preview_cache_bytes = 0
+            else:
+                target = canonical_s3_uri(uri)
+                stale_keys = [
+                    key
+                    for key in self._preview_cache
+                    if key[0] == target or key[0].startswith(target + "/")
+                ]
+                for key in stale_keys:
+                    self._preview_cache_bytes -= len(self._preview_cache.pop(key))
 
     def delete_entries(
         self,

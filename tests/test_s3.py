@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.util
+import io
 import tempfile
 import threading
 import time
@@ -21,7 +23,7 @@ from dux.s3 import (
     s3_parent,
 )
 from dux.s3_index import S3IndexResult, S3IndexStore, index_s3
-from dux.s3_tui import _sort_entries, run_s3_ui
+from dux.s3_tui import _is_image_name, _sort_entries, run_s3_ui
 
 
 class FakeS3Client:
@@ -33,6 +35,8 @@ class FakeS3Client:
         self.deleted: list[str] = []
         self.delete_batches: list[tuple[str, ...]] = []
         self.objects: dict[str, list[S3Object]] = {}
+        self.payloads: dict[str, bytes] = {}
+        self.get_calls: list[str] = []
 
     def list(self, uri: str):
         return [
@@ -43,6 +47,10 @@ class FakeS3Client:
     def list_with_info(self, uri: str):
         self.list_calls.append(uri)
         return iter(self.listings[uri])
+
+    def get(self, uri: str) -> bytes:
+        self.get_calls.append(uri)
+        return self.payloads[uri]
 
     def delete(self, uri: str) -> None:
         self.deleted.append(uri)
@@ -58,6 +66,11 @@ class FakeS3Client:
 
 
 class S3BrowserTests(unittest.TestCase):
+    def test_image_name_detection(self) -> None:
+        self.assertTrue(_is_image_name("sample.JPG"))
+        self.assertTrue(_is_image_name("archive.preview.webp"))
+        self.assertFalse(_is_image_name("image.json"))
+
     def test_s3_sort_defaults_descending_and_keeps_missing_last(self) -> None:
         entries = (
             S3Entry("s3://bucket/missing", "missing", True),
@@ -186,6 +199,38 @@ class S3BrowserTests(unittest.TestCase):
             low_level.deleted,
             [{"Bucket": "bucket", "Key": "root/file-0000.bin"}],
         )
+
+    def test_aoss_adapter_reads_object_bytes(self) -> None:
+        class Client:
+            def __init__(self) -> None:
+                self.uris = []
+
+            def get(self, uri: str) -> bytes:
+                self.uris.append(uri)
+                return b"image"
+
+        adapter = AossClientAdapter.__new__(AossClientAdapter)
+        adapter._client = Client()
+
+        self.assertEqual(adapter.get("s3://bucket/path/image.png"), b"image")
+        self.assertEqual(adapter._client.uris, ["s3://bucket/path/image.png"])
+
+    def test_object_preview_read_is_limited_and_cached(self) -> None:
+        client = FakeS3Client()
+        entry = S3Entry(
+            "s3://bucket/image.png", "image.png", False, 5, 100.0, True, 1
+        )
+        client.payloads[entry.uri] = b"image"
+        browser = S3Browser(client)
+
+        self.assertEqual(browser.read_object(entry, max_bytes=10), b"image")
+        self.assertEqual(browser.read_object(entry, max_bytes=10), b"image")
+        self.assertEqual(client.get_calls, [entry.uri])
+        with self.assertRaisesRegex(ValueError, "preview limit"):
+            browser.read_object(
+                S3Entry("s3://bucket/large.png", "large.png", False, 20),
+                max_bytes=10,
+            )
 
     def test_cached_directory_size_becomes_exact_after_visiting_children(self) -> None:
         client = FakeS3Client()
@@ -475,6 +520,52 @@ class S3BrowserTests(unittest.TestCase):
                     str(table.get_row("s3://bucket/root/folder")[1]),
                     "0B",
                 )
+
+        asyncio.run(exercise())
+
+    @unittest.skipUnless(
+        importlib.util.find_spec("textual_image"),
+        "textual-image optional dependency is not installed",
+    )
+    def test_tui_opens_image_preview_fitted_to_window(self) -> None:
+        from PIL import Image
+
+        client = FakeS3Client()
+        encoded = io.BytesIO()
+        Image.new("RGB", (4000, 2000), "#d97706").save(encoded, format="PNG")
+        payload = encoded.getvalue()
+        client.listings["s3://bucket/root"] = [
+            ("image.png", False, len(payload), 100.0),
+        ]
+        client.payloads["s3://bucket/root/image.png"] = payload
+        browser = S3Browser(client)
+        apps = []
+        with patch(
+            "textual.app.App.run",
+            lambda app, *args, **kwargs: apps.append((app, kwargs)),
+        ):
+            run_s3_ui("s3://bucket/root", 64, browser=browser)
+        app, _ = apps[0]
+
+        async def exercise() -> None:
+            async with app.run_test(size=(80, 24)) as pilot:
+                for _ in range(30):
+                    if len(app.rows_by_uri) == 1:
+                        break
+                    await pilot.pause(0.01)
+                await pilot.press("enter")
+                for _ in range(30):
+                    if len(app.screen_stack) == 2:
+                        break
+                    await pilot.pause(0.01)
+                self.assertEqual(len(app.screen_stack), 2)
+                image = app.screen.query_one("#image-preview")
+                self.assertEqual(str(image.styles.width), "auto")
+                self.assertEqual(str(image.styles.height), "auto")
+                self.assertLessEqual(image.region.width, 80)
+                self.assertLessEqual(image.region.height, 24)
+                await pilot.press("backspace")
+                self.assertEqual(len(app.screen_stack), 1)
 
         asyncio.run(exercise())
 

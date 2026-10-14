@@ -1,10 +1,30 @@
 from __future__ import annotations
 
+import io
 import threading
 import time
+from pathlib import Path
 
 from .s3 import S3Browser, S3DeleteCancelled, S3Entry, canonical_s3_uri, s3_parent
 from .s3_index import S3IndexStore
+
+
+IMAGE_SUFFIXES = {
+    ".avif",
+    ".bmp",
+    ".gif",
+    ".ico",
+    ".jpeg",
+    ".jpg",
+    ".png",
+    ".tif",
+    ".tiff",
+    ".webp",
+}
+
+
+def _is_image_name(name: str) -> bool:
+    return Path(name).suffix.casefold() in IMAGE_SUFFIXES
 
 
 def _human_bytes(size: int) -> str:
@@ -54,6 +74,11 @@ def run_s3_ui(
     except ImportError as exc:
         raise SystemExit("textual is required for `dux ui`; install project dependencies first") from exc
 
+    try:
+        from textual_image.widget import Image as TerminalImage
+    except ImportError:
+        TerminalImage = None
+
     s3_browser = (
         browser
         if browser is not None
@@ -83,6 +108,42 @@ def run_s3_ui(
 
         def key_escape(self) -> None:
             self.dismiss(False)
+
+    class ImagePreviewScreen(ModalScreen[None]):
+        BINDINGS = [
+            Binding("escape", "close_preview", "Close"),
+            Binding("backspace", "close_preview", "Close"),
+            Binding("left", "close_preview", "Close", show=False),
+        ]
+
+        def __init__(self, entry: S3Entry, payload: bytes) -> None:
+            super().__init__()
+            self.entry = entry
+            self.stream = io.BytesIO(payload)
+
+        def compose(self) -> ComposeResult:
+            assert TerminalImage is not None
+            yield Container(
+                Label(self.entry.uri, id="image-preview-title"),
+                Container(
+                    TerminalImage(
+                        self.stream,
+                        id="image-preview",
+                        on_error=lambda error: Label(
+                            f"Unable to decode image: {error}", classes="image-error"
+                        ),
+                    ),
+                    id="image-preview-stage",
+                ),
+                Label(
+                    "Backspace / Left / Esc: return",
+                    id="image-preview-help",
+                ),
+                id="image-preview-dialog",
+            )
+
+        def action_close_preview(self) -> None:
+            self.dismiss(None)
 
     class S3Table(DataTable):
         def on_key(self, event) -> None:
@@ -133,6 +194,34 @@ def run_s3_ui(
             border: heavy #d97706;
             background: #10282b;
         }
+        #image-preview-dialog {
+            width: 96%;
+            height: 94%;
+            margin: 1 2;
+            padding: 1 2;
+            border: heavy #d97706;
+            background: #071a1d;
+        }
+        #image-preview-title, #image-preview-help {
+            height: 1;
+            color: #f5e6b3;
+            text-align: center;
+        }
+        #image-preview-stage {
+            width: 1fr;
+            height: 1fr;
+            align: center middle;
+            overflow: hidden hidden;
+        }
+        #image-preview {
+            width: auto;
+            height: auto;
+            max-width: 100%;
+            max-height: 100%;
+        }
+        .image-error {
+            color: #f87171;
+        }
         """
         BINDINGS = [
             Binding("q", "request_quit", "Quit"),
@@ -167,6 +256,7 @@ def run_s3_ui(
             self.load_generation = 0
             self.delete_active = False
             self.delete_cancel_event: threading.Event | None = None
+            self.preview_generation = 0
 
         def compose(self) -> ComposeResult:
             yield Header()
@@ -302,8 +392,57 @@ def run_s3_ui(
 
         def action_open_selected(self) -> None:
             entry = self._selected_entry()
-            if entry is not None and entry.is_dir:
+            if entry is None:
+                return
+            if entry.is_dir:
                 self._navigate_to(entry.uri)
+            elif _is_image_name(entry.name):
+                self._start_image_preview(entry)
+            else:
+                self.notify("Preview is currently available for image objects only.")
+
+        def _start_image_preview(self, entry: S3Entry) -> None:
+            if TerminalImage is None:
+                self.notify(
+                    "Image preview requires `pip install -e '.[images]'`.",
+                    severity="warning",
+                )
+                return
+            self.preview_generation += 1
+            generation = self.preview_generation
+            self._set_status(f"Loading image {entry.uri}...")
+
+            def worker() -> None:
+                try:
+                    payload = self.browser.read_object(entry)
+                    self.call_from_thread(
+                        self._finish_image_preview, generation, entry, payload, None
+                    )
+                except BaseException as exc:
+                    self.call_from_thread(
+                        self._finish_image_preview, generation, entry, b"", exc
+                    )
+
+            self.run_worker(worker, thread=True, exclusive=False)
+
+        def _finish_image_preview(
+            self,
+            generation: int,
+            entry: S3Entry,
+            payload: bytes,
+            error: BaseException | None,
+        ) -> None:
+            if generation != self.preview_generation:
+                return
+            if error is not None:
+                self._set_status(f"Unable to preview {entry.uri}: {error}")
+                self.notify(str(error), severity="error")
+                return
+
+            def after_preview(_result: None) -> None:
+                self._redraw(entry.uri)
+
+            self.push_screen(ImagePreviewScreen(entry, payload), after_preview)
 
         def _navigate_to(self, destination: str, *, remember: bool = True) -> None:
             destination = canonical_s3_uri(destination)
