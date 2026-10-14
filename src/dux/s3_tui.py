@@ -75,9 +75,16 @@ def run_s3_ui(
         raise SystemExit("textual is required for `dux ui`; install project dependencies first") from exc
 
     try:
+        from textual_image.renderable import Image as TerminalRenderable
         from textual_image.widget import Image as TerminalImage
     except ImportError:
+        TerminalRenderable = None
         TerminalImage = None
+    image_renderer = (
+        "unavailable"
+        if TerminalRenderable is None
+        else TerminalRenderable.__module__.rsplit(".", 1)[-1]
+    )
 
     s3_browser = (
         browser
@@ -111,20 +118,33 @@ def run_s3_ui(
 
     class ImagePreviewScreen(ModalScreen[None]):
         BINDINGS = [
-            Binding("escape", "close_preview", "Close"),
-            Binding("backspace", "close_preview", "Close"),
-            Binding("left", "close_preview", "Close", show=False),
+            Binding("escape", "close_preview", "Close", priority=True),
+            Binding("backspace", "close_preview", "Close", priority=True),
+            Binding("left", "previous_image", "Previous", priority=True),
+            Binding("right", "next_image", "Next", priority=True),
         ]
 
-        def __init__(self, entry: S3Entry, payload: bytes) -> None:
+        def __init__(
+            self,
+            entry: S3Entry,
+            payload: bytes,
+            position: int,
+            total: int,
+        ) -> None:
             super().__init__()
             self.entry = entry
             self.stream = io.BytesIO(payload)
+            self.position = position
+            self.total = total
+
+        def _title(self, entry: S3Entry, *, loading: bool = False) -> str:
+            prefix = "Loading " if loading else ""
+            return f"{prefix}[{self.position}/{self.total}] {entry.uri}"
 
         def compose(self) -> ComposeResult:
             assert TerminalImage is not None
             yield Container(
-                Label(self.entry.uri, id="image-preview-title"),
+                Label(self._title(self.entry), id="image-preview-title"),
                 Container(
                     TerminalImage(
                         self.stream,
@@ -136,14 +156,44 @@ def run_s3_ui(
                     id="image-preview-stage",
                 ),
                 Label(
-                    "Backspace / Left / Esc: return",
+                    f"Left/Right: image    Backspace/Esc: return    renderer={image_renderer}",
                     id="image-preview-help",
                 ),
                 id="image-preview-dialog",
             )
 
+        def show_loading(self, entry: S3Entry, position: int, total: int) -> None:
+            self.position = position
+            self.total = total
+            self.query_one("#image-preview-title", Label).update(
+                self._title(entry, loading=True)
+            )
+
+        def show_image(
+            self,
+            entry: S3Entry,
+            payload: bytes,
+            position: int,
+            total: int,
+        ) -> None:
+            self.entry = entry
+            self.position = position
+            self.total = total
+            self.stream = io.BytesIO(payload)
+            self.query_one("#image-preview", TerminalImage).image = self.stream
+            self.query_one("#image-preview-title", Label).update(self._title(entry))
+
+        def restore_title(self) -> None:
+            self.query_one("#image-preview-title", Label).update(self._title(self.entry))
+
         def action_close_preview(self) -> None:
             self.dismiss(None)
+
+        def action_previous_image(self) -> None:
+            self.app.preview_relative_image(-1)
+
+        def action_next_image(self) -> None:
+            self.app.preview_relative_image(1)
 
     class S3Table(DataTable):
         def on_key(self, event) -> None:
@@ -401,7 +451,25 @@ def run_s3_ui(
             else:
                 self.notify("Preview is currently available for image objects only.")
 
-        def _start_image_preview(self, entry: S3Entry) -> None:
+        def _preview_entries(self) -> list[S3Entry]:
+            return [
+                entry
+                for entry in self.entries
+                if not entry.is_dir and _is_image_name(entry.name)
+            ]
+
+        def _preview_position(self, entry: S3Entry) -> tuple[int, int]:
+            entries = self._preview_entries()
+            for index, candidate in enumerate(entries):
+                if candidate.uri == entry.uri:
+                    return index + 1, len(entries)
+            return 1, max(1, len(entries))
+
+        def _start_image_preview(
+            self,
+            entry: S3Entry,
+            screen: ImagePreviewScreen | None = None,
+        ) -> None:
             if TerminalImage is None:
                 self.notify(
                     "Image preview requires `pip install -e '.[images]'`.",
@@ -410,17 +478,30 @@ def run_s3_ui(
                 return
             self.preview_generation += 1
             generation = self.preview_generation
+            position, total = self._preview_position(entry)
+            if screen is not None:
+                screen.show_loading(entry, position, total)
             self._set_status(f"Loading image {entry.uri}...")
 
             def worker() -> None:
                 try:
                     payload = self.browser.read_object(entry)
                     self.call_from_thread(
-                        self._finish_image_preview, generation, entry, payload, None
+                        self._finish_image_preview,
+                        generation,
+                        entry,
+                        payload,
+                        screen,
+                        None,
                     )
                 except BaseException as exc:
                     self.call_from_thread(
-                        self._finish_image_preview, generation, entry, b"", exc
+                        self._finish_image_preview,
+                        generation,
+                        entry,
+                        b"",
+                        screen,
+                        exc,
                     )
 
             self.run_worker(worker, thread=True, exclusive=False)
@@ -430,19 +511,54 @@ def run_s3_ui(
             generation: int,
             entry: S3Entry,
             payload: bytes,
+            screen: ImagePreviewScreen | None,
             error: BaseException | None,
         ) -> None:
             if generation != self.preview_generation:
                 return
+            if screen is not None and screen is not self.screen:
+                return
             if error is not None:
+                if screen is not None:
+                    screen.restore_title()
                 self._set_status(f"Unable to preview {entry.uri}: {error}")
                 self.notify(str(error), severity="error")
                 return
 
-            def after_preview(_result: None) -> None:
-                self._redraw(entry.uri)
+            position, total = self._preview_position(entry)
+            self._set_status(
+                f"Preview {position}/{total} | renderer={image_renderer} | {entry.uri}"
+            )
+            if screen is not None:
+                screen.show_image(entry, payload, position, total)
+                return
 
-            self.push_screen(ImagePreviewScreen(entry, payload), after_preview)
+            preview = ImagePreviewScreen(entry, payload, position, total)
+
+            def after_preview(_result: None) -> None:
+                self.preview_generation += 1
+                self._redraw(preview.entry.uri)
+
+            self.push_screen(preview, after_preview)
+
+        def preview_relative_image(self, offset: int) -> None:
+            screen = self.screen
+            if not isinstance(screen, ImagePreviewScreen):
+                return
+            entries = self._preview_entries()
+            if len(entries) <= 1:
+                self.notify("No other image in the current listing.")
+                return
+            current = next(
+                (
+                    index
+                    for index, entry in enumerate(entries)
+                    if entry.uri == screen.entry.uri
+                ),
+                0,
+            )
+            target = entries[(current + offset) % len(entries)]
+            self._start_image_preview(target, screen=screen)
 
         def _navigate_to(self, destination: str, *, remember: bool = True) -> None:
             destination = canonical_s3_uri(destination)

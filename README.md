@@ -128,9 +128,13 @@ Install the optional image renderer on Python 3.12 or newer to preview S3 images
 pip install -e '.[images]'
 ```
 
-Select a supported image object and press `Enter`. The object is loaded in the background, cached in memory, and rendered in a modal that follows the current terminal dimensions while preserving the image aspect ratio. `Backspace`, `Left`, or `Esc` returns to the listing. Objects larger than 64 MiB are rejected before download when their listed size is known.
+Select a supported image object and press `Enter`. The object is loaded in the background, cached in memory, and rendered in a modal that follows the current terminal dimensions while preserving the image aspect ratio. `Left`/`Right` switches between images in the current sorted listing; `Backspace` or `Esc` returns to the list and restores the cursor to the last viewed image. Objects larger than 64 MiB are rejected before download when their listed size is known.
 
-选中支持的图片对象后按 `Enter`，对象会在后台加载并缓存在内存中，再按当前终端尺寸等比例显示于 modal；按 `Backspace`、`Left` 或 `Esc` 返回列表。若 listing 中已知对象超过 64 MiB，会在下载前拒绝预览。
+选中支持的图片对象后按 `Enter`，对象会在后台加载并缓存在内存中，再按当前终端尺寸等比例显示于 modal；按 `Left`/`Right` 可在当前排序列表的图片间切换，按 `Backspace` 或 `Esc` 返回列表并把光标恢复到最后查看的图片。若 listing 中已知对象超过 64 MiB，会在下载前拒绝预览。
+
+The preview footer reports the selected renderer. Kitty and Sixel send compact terminal graphics commands and normally appear quickly. `halfcell` and `unicode` render colored character cells, which can visibly repaint line by line and generate much more SSH output; in that case, enable the terminal's image protocol or the required tmux passthrough for the best performance.
+
+预览底部会显示实际 renderer。Kitty 和 Sixel 使用紧凑的终端图像指令，通常能快速整体显示；`halfcell` 和 `unicode` 需要绘制大量彩色字符，在 SSH 中可能明显逐行刷新并产生更多输出。出现这种情况时，建议启用终端图像协议，经过 tmux 时同时启用相应 passthrough。
 
 Build exact recursive prefix statistics with one streaming object-list pass:
 

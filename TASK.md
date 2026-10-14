@@ -1,12 +1,19 @@
-# 当前任务：S3 图片预览
+# 当前任务：S3 图片预览导航与渲染诊断
 
-当前目标：S3 UI 中对图片对象按 `Enter` 后，在终端内按当前窗口大小等比例预览。
+当前目标：图片 modal 中用左右键切换相邻图片、退格返回列表，并显示实际终端 renderer。
 
-交付物：AOSS 对象读取、后台加载与缓存、自适应图片 modal、测试和双语 README。
+交付物：高优先级预览快捷键、缓存复用的异步切图、renderer 提示、测试和 README。
 
 锁定对象：`/mnt/afs/wangruohui/tools/dux`；测试使用内存图片和 fake client，不读取或修改真实 S3 对象。
 
-阶段：DONE，图片读取、自适应预览、部署和测试均已完成。
+阶段：DONE，预览导航、renderer 诊断和回归测试均已完成。
+
+- DONE：`Left/Right` 按当前排序循环切换图片，`Backspace/Esc` 高优先级返回列表。
+- DONE：预览底部显示 TGP/Sixel/halfcell/unicode renderer，README 说明性能差异。
+- DONE：切换回已查看图片命中缓存且不重复读取；返回后恢复最后图片光标。
+- DONE：S3 专项 22 项和完整 66 项测试通过。
+
+## 已完成的 S3 图片预览
 
 - DONE：AOSS `Client.get` 接入后台对象读取，增加 64 MiB 限制和 8 项/128 MiB LRU 缓存。
 - DONE：图片 modal 使用当前可用终端区域等比例布局，支持 `Backspace`、`Left`、`Esc` 返回。

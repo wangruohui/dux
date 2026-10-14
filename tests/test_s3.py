@@ -535,9 +535,11 @@ class S3BrowserTests(unittest.TestCase):
         Image.new("RGB", (4000, 2000), "#d97706").save(encoded, format="PNG")
         payload = encoded.getvalue()
         client.listings["s3://bucket/root"] = [
-            ("image.png", False, len(payload), 100.0),
+            ("a.png", False, len(payload), 100.0),
+            ("b.png", False, len(payload), 100.0),
         ]
-        client.payloads["s3://bucket/root/image.png"] = payload
+        client.payloads["s3://bucket/root/a.png"] = payload
+        client.payloads["s3://bucket/root/b.png"] = payload
         browser = S3Browser(client)
         apps = []
         with patch(
@@ -550,7 +552,7 @@ class S3BrowserTests(unittest.TestCase):
         async def exercise() -> None:
             async with app.run_test(size=(80, 24)) as pilot:
                 for _ in range(30):
-                    if len(app.rows_by_uri) == 1:
+                    if len(app.rows_by_uri) == 2:
                         break
                     await pilot.pause(0.01)
                 await pilot.press("enter")
@@ -564,8 +566,30 @@ class S3BrowserTests(unittest.TestCase):
                 self.assertEqual(str(image.styles.height), "auto")
                 self.assertLessEqual(image.region.width, 80)
                 self.assertLessEqual(image.region.height, 24)
+                preview = app.screen
+                self.assertEqual(preview.entry.name, "a.png")
+                await pilot.press("right")
+                for _ in range(30):
+                    if preview.entry.name == "b.png":
+                        break
+                    await pilot.pause(0.01)
+                self.assertEqual(preview.entry.name, "b.png")
+                await pilot.press("left")
+                for _ in range(30):
+                    if preview.entry.name == "a.png":
+                        break
+                    await pilot.pause(0.01)
+                self.assertEqual(preview.entry.name, "a.png")
+                self.assertEqual(
+                    client.get_calls,
+                    ["s3://bucket/root/a.png", "s3://bucket/root/b.png"],
+                )
                 await pilot.press("backspace")
                 self.assertEqual(len(app.screen_stack), 1)
+                self.assertEqual(
+                    app._selected_entry().uri,
+                    "s3://bucket/root/a.png",
+                )
 
         asyncio.run(exercise())
 
